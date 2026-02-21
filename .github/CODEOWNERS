@@ -1,0 +1,5 @@
+# codeowners file for requiring approval on pull requests
+# any pr touching these files requires review from the specified owner
+
+# lennox owns all files - requires approval for any pr
+* @lennox55555
