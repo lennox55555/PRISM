@@ -169,9 +169,6 @@ const ErrorIcon = () => (
 );
 
 export function SVGRenderer({ svgCode, isLoading, error }: SVGRendererProps) {
-  // determine if this is being rendered inline (inside svg list item)
-  const isInline = svgCode !== '';
-
   // show loading state
   if (isLoading) {
     return (

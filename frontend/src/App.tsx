@@ -6,7 +6,8 @@
 
 import { useState, useCallback, useRef, useEffect } from 'react';
 import { AudioRecorder } from './components/AudioRecorder';
-import { SVGRenderer } from './components/SVGRenderer';
+import { summarizeUserSpeech } from './services/api';
+import PptxGenJS from 'pptxgenjs';
 import {
   TranscriptionResult,
   SVGGenerationResponse,
@@ -37,6 +38,99 @@ interface Session {
   name: string;
   notes: NoteHistoryItem[];
   transcriptionText: string;
+}
+
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function sanitizeFilename(input: string): string {
+  return input
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 60) || 'session';
+}
+
+function splitIntoChunks(items: string[], chunkSize: number): string[][] {
+  const chunks: string[][] = [];
+  for (let i = 0; i < items.length; i += chunkSize) {
+    chunks.push(items.slice(i, i + chunkSize));
+  }
+  return chunks;
+}
+
+async function svgMarkupToPngDataUrl(
+  svgMarkup: string,
+  width = 1600,
+  height = 900
+): Promise<string> {
+  let normalizedSvg = svgMarkup.trim();
+
+  // Remove export-time animation styles so we don't capture an initial hidden frame.
+  normalizedSvg = normalizedSvg.replace(
+    /<style[\s\S]*?@keyframes\s+(fadeIn|scaleIn|slideIn)[\s\S]*?<\/style>/gi,
+    ''
+  );
+  normalizedSvg = normalizedSvg.replace(/\sstyle\s*=\s*["'][^"']*animation:[^"']*["']/gi, '');
+
+  if (!/xmlns\s*=\s*["']http:\/\/www\.w3\.org\/2000\/svg["']/i.test(normalizedSvg)) {
+    normalizedSvg = normalizedSvg.replace(
+      /<svg\b/i,
+      '<svg xmlns="http://www.w3.org/2000/svg"'
+    );
+  }
+
+  normalizedSvg = normalizedSvg.replace(/<svg\b([^>]*)>/i, (_match, attrs: string) => {
+    const cleanedAttrs = attrs
+      .replace(/\swidth\s*=\s*["'][^"']*["']/i, '')
+      .replace(/\sheight\s*=\s*["'][^"']*["']/i, '');
+
+    const hasViewBox = /viewBox\s*=/.test(cleanedAttrs);
+    const viewBoxAttr = hasViewBox ? '' : ` viewBox="0 0 ${width} ${height}"`;
+
+    return `<svg${cleanedAttrs}${viewBoxAttr} width="${width}" height="${height}" preserveAspectRatio="xMidYMid meet">`;
+  });
+
+  const blob = new Blob([normalizedSvg], {
+    type: 'image/svg+xml;charset=utf-8',
+  });
+  const svgUrl = URL.createObjectURL(blob);
+
+  try {
+    const image = await new Promise<HTMLImageElement>((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => resolve(img);
+      img.onerror = () => reject(new Error('Failed to load SVG for PPTX conversion'));
+      img.src = svgUrl;
+    });
+
+    if (!image.naturalWidth || !image.naturalHeight) {
+      throw new Error('Loaded SVG has zero dimensions for PPTX conversion');
+    }
+
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext('2d');
+
+    if (!ctx) {
+      throw new Error('Canvas context unavailable for SVG conversion');
+    }
+
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, width, height);
+    ctx.drawImage(image, 0, 0, width, height);
+
+    return canvas.toDataURL('image/png');
+  } finally {
+    URL.revokeObjectURL(svgUrl);
+  }
 }
 
 function App() {
@@ -275,6 +369,444 @@ function App() {
   // ref to track previous state for transition detection
   const prevRecordingStateRef = useRef<RecordingState>('idle');
 
+  const getSessionContextForExport = useCallback(() => {
+    const allSessionSVGs = notesHistory
+      .filter((item) => item.type === 'svg' && typeof item.svg === 'string')
+      .map((item) => item.svg as string);
+
+    const allUserSpeechTexts = [
+      ...notesHistory
+        .map((item) => item.newTextDelta || item.originalText)
+        .filter((text) => typeof text === 'string' && text.trim().length > 0),
+      ...(transcriptionText.trim().length > 0 ? [transcriptionText] : []),
+    ];
+
+    return {
+      allSessionSVGs,
+      allUserSpeechTexts,
+    };
+  }, [notesHistory, transcriptionText]);
+
+  const exportSessionAsTxt = useCallback(() => {
+    const { allSessionSVGs, allUserSpeechTexts } = getSessionContextForExport();
+    const activeSession = sessions.find((session) => session.id === activeSessionId);
+
+    const exportBody = [
+      'PRISM Session Export',
+      `Session ID: ${activeSessionId}`,
+      `Session Name: ${activeSession?.name ?? 'Unknown Session'}`,
+      `Exported At: ${new Date().toISOString()}`,
+      '',
+      'allSessionSVGs:',
+      JSON.stringify(allSessionSVGs, null, 2),
+      '',
+      'allUserSpeechTexts:',
+      JSON.stringify(allUserSpeechTexts, null, 2),
+      '',
+    ].join('\n');
+
+    const blob = new Blob([exportBody], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `session-${activeSessionId}-export.txt`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }, [activeSessionId, getSessionContextForExport, sessions]);
+
+  const exportSessionAsPdf = useCallback(async () => {
+    const { allSessionSVGs, allUserSpeechTexts } = getSessionContextForExport();
+    const activeSession = sessions.find((session) => session.id === activeSessionId);
+    const chartItems = notesHistory.filter(
+      (item) => item.type === 'chart' && typeof item.chartImage === 'string'
+    );
+    let llmSummary = 'Summary unavailable.';
+
+    if (allUserSpeechTexts.length > 0) {
+      try {
+        const summaryResponse = await summarizeUserSpeech(allUserSpeechTexts);
+        if (summaryResponse.summary && summaryResponse.summary.trim().length > 0) {
+          llmSummary = summaryResponse.summary.trim();
+        }
+      } catch (summaryError) {
+        console.warn('summary generation failed for PDF export:', summaryError);
+      }
+    }
+
+    const speechItemsHtml =
+      allUserSpeechTexts.length > 0
+        ? allUserSpeechTexts
+            .map(
+              (text, index) => `
+                <section class="card">
+                  <h3>Speech ${index + 1}</h3>
+                  <p>${escapeHtml(text)}</p>
+                </section>
+              `
+            )
+            .join('')
+        : '<p class="empty">No user speech captured.</p>';
+
+    const svgItemsHtml =
+      allSessionSVGs.length > 0
+        ? allSessionSVGs
+            .map(
+              (svg, index) => `
+                <section class="card visualization-card">
+                  <h3>SVG ${index + 1}</h3>
+                  <div class="viz-container">
+                    <div class="viz-svg">${svg}</div>
+                  </div>
+                </section>
+              `
+            )
+            .join('')
+        : '<p class="empty">No SVG visualizations captured.</p>';
+
+    const chartItemsHtml =
+      chartItems.length > 0
+        ? chartItems
+            .map((item, index) => {
+              const textSnippet = escapeHtml(item.newTextDelta || item.originalText || '');
+              const description = item.description ? escapeHtml(item.description) : '';
+              const timestamp = new Date(item.timestamp).toLocaleString();
+
+              return `
+                <section class="card visualization-card">
+                  <h3>Chart ${index + 1}</h3>
+                  <div class="meta">
+                    <div><strong>Timestamp:</strong> ${escapeHtml(timestamp)}</div>
+                    <div><strong>Confidence:</strong> ${
+                      typeof item.chartConfidence === 'number'
+                        ? `${(item.chartConfidence * 100).toFixed(0)}%`
+                        : 'n/a'
+                    }</div>
+                  </div>
+                  <p><strong>Text:</strong> ${textSnippet}</p>
+                  ${description ? `<p><strong>Description:</strong> ${description}</p>` : ''}
+                  <div class="viz-container">
+                    <img class="viz-image" src="data:image/png;base64,${item.chartImage}" alt="Chart ${index + 1}" />
+                  </div>
+                </section>
+              `;
+            })
+            .join('')
+        : '<p class="empty">No chart visualizations captured.</p>';
+
+    const html = `
+      <!doctype html>
+      <html>
+        <head>
+          <meta charset="utf-8" />
+          <title>Session ${activeSessionId} Export</title>
+          <style>
+            * { box-sizing: border-box; }
+            body {
+              margin: 0;
+              padding: 28px;
+              font-family: Inter, Arial, sans-serif;
+              color: #111827;
+              background: #ffffff;
+              line-height: 1.5;
+            }
+            h1 { margin: 0 0 6px; font-size: 24px; }
+            h2 { margin: 26px 0 12px; font-size: 18px; border-bottom: 1px solid #e5e7eb; padding-bottom: 6px; }
+            h3 { margin: 0 0 8px; font-size: 14px; }
+            p { margin: 0 0 10px; white-space: pre-wrap; word-break: break-word; }
+            .subtle { color: #4b5563; font-size: 12px; }
+            .card {
+              border: 1px solid #d1d5db;
+              border-radius: 10px;
+              padding: 12px;
+              margin-bottom: 10px;
+              page-break-inside: avoid;
+              break-inside: avoid;
+            }
+            .meta {
+              display: grid;
+              grid-template-columns: 1fr 1fr;
+              gap: 8px;
+              margin-bottom: 8px;
+              font-size: 12px;
+              color: #374151;
+            }
+            .viz-container {
+              margin-top: 10px;
+              border: 1px solid #e5e7eb;
+              border-radius: 8px;
+              padding: 8px;
+              background: #fafafa;
+              min-height: 220px;
+            }
+            .viz-image {
+              width: 100%;
+              height: auto;
+              display: block;
+            }
+            .viz-svg svg {
+              width: 100% !important;
+              height: auto !important;
+              display: block;
+            }
+            .empty { color: #6b7280; font-style: italic; }
+            .summary {
+              margin-top: 12px;
+              font-size: 12px;
+              color: #374151;
+            }
+            @media print {
+              body { padding: 14mm; }
+            }
+          </style>
+        </head>
+        <body>
+          <h1>PRISM Session Export</h1>
+          <div class="subtle">Session ID: ${activeSessionId}</div>
+          <div class="subtle">Session Name: ${escapeHtml(activeSession?.name ?? 'Unknown Session')}</div>
+          <div class="subtle">Exported At: ${escapeHtml(new Date().toISOString())}</div>
+          <div class="summary">
+            <div><strong>Speech Items:</strong> ${allUserSpeechTexts.length}</div>
+            <div><strong>SVG Items:</strong> ${allSessionSVGs.length}</div>
+            <div><strong>Chart Items:</strong> ${chartItems.length}</div>
+          </div>
+
+          <h2>User Speech / Text</h2>
+          ${speechItemsHtml}
+
+          <h2>SVG Visualizations</h2>
+          ${svgItemsHtml}
+
+          <h2>Chart Visualizations</h2>
+          ${chartItemsHtml}
+
+          <h2>LLM Summary</h2>
+          <section class="card">
+            <p>${escapeHtml(llmSummary)}</p>
+          </section>
+
+          <script>
+            window.addEventListener('load', () => {
+              setTimeout(() => {
+                window.print();
+              }, 350);
+            });
+          </script>
+        </body>
+      </html>
+    `;
+
+    const blob = new Blob([html], { type: 'text/html;charset=utf-8' });
+    const blobUrl = URL.createObjectURL(blob);
+    const printWindow = window.open(blobUrl, '_blank');
+    if (!printWindow) {
+      setError('Unable to open export window. Please allow pop-ups and try again.');
+      URL.revokeObjectURL(blobUrl);
+      return;
+    }
+
+    // clean up object URL after the popup has had time to load
+    setTimeout(() => URL.revokeObjectURL(blobUrl), 60000);
+  }, [activeSessionId, getSessionContextForExport, notesHistory, sessions]);
+
+  const exportSessionAsPptx = useCallback(async () => {
+    const { allSessionSVGs, allUserSpeechTexts } = getSessionContextForExport();
+    const activeSession = sessions.find((session) => session.id === activeSessionId);
+    const visualizationItems = notesHistory.filter(
+      (item) => item.type === 'svg' || item.type === 'chart'
+    );
+
+    let llmSummary = 'Summary unavailable.';
+    if (allUserSpeechTexts.length > 0) {
+      try {
+        const summaryResponse = await summarizeUserSpeech(allUserSpeechTexts);
+        if (summaryResponse.summary && summaryResponse.summary.trim().length > 0) {
+          llmSummary = summaryResponse.summary.trim();
+        }
+      } catch (summaryError) {
+        console.warn('summary generation failed for PPTX export:', summaryError);
+      }
+    }
+
+    try {
+      const pptx = new PptxGenJS();
+      pptx.layout = 'LAYOUT_WIDE';
+      pptx.author = 'PRISM';
+      pptx.company = 'PRISM';
+      pptx.subject = 'Voice Session Export';
+      pptx.title = `Session ${activeSessionId} Export`;
+
+      // title slide
+      const titleSlide = pptx.addSlide();
+      titleSlide.background = { color: 'F8FAFC' };
+      titleSlide.addText('PRISM Session Export', {
+        x: 0.6,
+        y: 0.5,
+        w: 12.2,
+        h: 0.6,
+        fontSize: 30,
+        bold: true,
+        color: '0F172A',
+      });
+      titleSlide.addText(
+        `Session: ${activeSession?.name ?? `Session ${activeSessionId}`}\n` +
+          `Exported: ${new Date().toLocaleString()}\n` +
+          `Speech Items: ${allUserSpeechTexts.length}\n` +
+          `SVG Items: ${allSessionSVGs.length}\n` +
+          `Visualization Items: ${visualizationItems.length}`,
+        {
+          x: 0.6,
+          y: 1.5,
+          w: 6.8,
+          h: 2.4,
+          fontSize: 15,
+          color: '334155',
+          valign: 'top',
+          breakLine: true,
+        }
+      );
+
+      // speech slides
+      if (allUserSpeechTexts.length > 0) {
+        const speechChunks = splitIntoChunks(allUserSpeechTexts, 6);
+        speechChunks.forEach((chunk, chunkIndex) => {
+          const slide = pptx.addSlide();
+          slide.addText(
+            `User Speech (${chunkIndex + 1}/${speechChunks.length})`,
+            {
+              x: 0.5,
+              y: 0.3,
+              w: 12.2,
+              h: 0.5,
+              fontSize: 22,
+              bold: true,
+              color: '0F172A',
+            }
+          );
+
+          const bulletText = chunk
+            .map((text, index) => `${index + 1}. ${text}`)
+            .join('\n\n');
+
+          slide.addText(bulletText, {
+            x: 0.7,
+            y: 1.0,
+            w: 12.0,
+            h: 5.9,
+            fontSize: 14,
+            color: '1F2937',
+            valign: 'top',
+            breakLine: true,
+          });
+        });
+      }
+
+      // visualization slides
+      for (let i = 0; i < visualizationItems.length; i += 1) {
+        const item = visualizationItems[i];
+        const slide = pptx.addSlide();
+        const timestamp = new Date(item.timestamp).toLocaleString();
+        const textSnippet = (item.newTextDelta || item.originalText || '').slice(0, 550);
+
+        slide.addText(
+          `${item.type === 'chart' ? 'Chart' : 'SVG'} ${i + 1}/${visualizationItems.length}`,
+          {
+            x: 0.5,
+            y: 0.25,
+            w: 12.3,
+            h: 0.45,
+            fontSize: 20,
+            bold: true,
+            color: '0F172A',
+          }
+        );
+
+        slide.addText(
+          `Mode: ${item.generationMode || 'unknown'}\n` +
+            `Timestamp: ${timestamp}\n\n` +
+            `Text:\n${textSnippet}`,
+          {
+            x: 0.5,
+            y: 0.9,
+            w: 4.6,
+            h: 5.9,
+            fontSize: 12,
+            color: '334155',
+            valign: 'top',
+            breakLine: true,
+          }
+        );
+
+        let imageData = '';
+        if (item.type === 'chart' && item.chartImage) {
+          imageData = `data:image/png;base64,${item.chartImage}`;
+        } else if (item.type === 'svg' && item.svg) {
+          try {
+            imageData = await svgMarkupToPngDataUrl(item.svg);
+          } catch (conversionError) {
+            console.warn('SVG to PNG conversion failed for PPTX:', conversionError);
+          }
+        }
+
+        if (imageData) {
+          slide.addImage({
+            data: imageData,
+            x: 5.2,
+            y: 0.9,
+            w: 7.7,
+            h: 5.9,
+          });
+        } else {
+          slide.addText('Visualization preview unavailable for this item.', {
+            x: 5.2,
+            y: 2.8,
+            w: 7.5,
+            h: 0.8,
+            fontSize: 15,
+            color: '6B7280',
+            italic: true,
+            align: 'center',
+          });
+        }
+      }
+
+      // summary slide
+      const summarySlide = pptx.addSlide();
+      summarySlide.background = { color: 'F8FAFC' };
+      summarySlide.addText('LLM Summary', {
+        x: 0.6,
+        y: 0.5,
+        w: 12.2,
+        h: 0.6,
+        fontSize: 28,
+        bold: true,
+        color: '0F172A',
+      });
+      summarySlide.addText(llmSummary, {
+        x: 0.7,
+        y: 1.4,
+        w: 12.0,
+        h: 5.3,
+        fontSize: 16,
+        color: '1F2937',
+        valign: 'top',
+        breakLine: true,
+      });
+
+      const fileBase = sanitizeFilename(activeSession?.name ?? `session-${activeSessionId}`);
+      await pptx.writeFile({ fileName: `${fileBase}-export.pptx` });
+    } catch (exportError) {
+      console.error('PPTX export failed:', exportError);
+      setError('PowerPoint export failed. Please try again.');
+    }
+  }, [activeSessionId, getSessionContextForExport, notesHistory, sessions]);
+
+  const hasExportableData =
+    notesHistory.length > 0 || transcriptionText.trim().length > 0;
+  const canShowExport =
+    recordingState === 'idle' && !isGeneratingSVG && hasExportableData;
+
   const handleRecordingStateChange = useCallback((state: RecordingState) => {
     const prevState = prevRecordingStateRef.current;
 
@@ -298,10 +830,34 @@ function App() {
     }
 
     if (state === 'processing') {
+      // capture current in-memory session context when user clicks stop recording
+      if (prevState === 'recording') {
+        const allSessionSVGs = notesHistoryRef.current
+          .filter((item) => item.type === 'svg' && typeof item.svg === 'string')
+          .map((item) => item.svg as string);
+
+        const allUserSpeechTexts = [
+          ...notesHistoryRef.current
+            .map((item) => item.newTextDelta || item.originalText)
+            .filter((text) => typeof text === 'string' && text.trim().length > 0),
+          ...(
+            transcriptionTextRef.current.trim().length > 0
+              ? [transcriptionTextRef.current]
+              : []
+          ),
+        ];
+
+        console.log('[Session Context @ Stop]', {
+          allSessionSVGs,
+          allUserSpeechTexts,
+        });
+      }
+
       setIsGeneratingSVG(true);
     }
 
     if (state === 'idle') {
+      setIsGeneratingSVG(false);
       setVisualizationActive(false);
       // Save session when recording stops (use refs to avoid dependency cycles)
       setSessions(prev => prev.map(s =>
@@ -560,6 +1116,104 @@ function App() {
           marginTop: 'auto',
           borderTop: `1px solid ${theme.border}`,
         }}>
+          {canShowExport && (
+            <details style={{ position: 'relative' }}>
+              <summary
+                style={{
+                  padding: '10px 14px',
+                  borderRadius: '8px',
+                  border: `1px solid ${theme.border}`,
+                  color: theme.text,
+                  cursor: 'pointer',
+                  userSelect: 'none',
+                  fontSize: '14px',
+                  backgroundColor: theme.sidebar,
+                }}
+              >
+                Export
+              </summary>
+              <div
+                style={{
+                  position: 'absolute',
+                  bottom: 'calc(100% + 8px)',
+                  left: 0,
+                  minWidth: '140px',
+                  borderRadius: '8px',
+                  border: `1px solid ${theme.border}`,
+                  backgroundColor: theme.sidebar,
+                  boxShadow: '0 6px 20px rgba(0, 0, 0, 0.25)',
+                  overflow: 'hidden',
+                }}
+              >
+                <button
+                  onClick={(event) => {
+                    exportSessionAsTxt();
+                    const details = event.currentTarget.closest('details');
+                    if (details instanceof HTMLDetailsElement) {
+                      details.open = false;
+                    }
+                  }}
+                  style={{
+                    width: '100%',
+                    textAlign: 'left',
+                    padding: '10px 12px',
+                    background: 'transparent',
+                    color: theme.text,
+                    border: 'none',
+                    cursor: 'pointer',
+                    fontSize: '14px',
+                  }}
+                >
+                  .txt
+                </button>
+                <button
+                  onClick={(event) => {
+                    void exportSessionAsPdf();
+                    const details = event.currentTarget.closest('details');
+                    if (details instanceof HTMLDetailsElement) {
+                      details.open = false;
+                    }
+                  }}
+                  style={{
+                    width: '100%',
+                    textAlign: 'left',
+                    padding: '10px 12px',
+                    background: 'transparent',
+                    color: theme.text,
+                    border: 'none',
+                    borderTop: `1px solid ${theme.border}`,
+                    cursor: 'pointer',
+                    fontSize: '14px',
+                  }}
+                >
+                  .pdf
+                </button>
+                <button
+                  onClick={(event) => {
+                    void exportSessionAsPptx();
+                    const details = event.currentTarget.closest('details');
+                    if (details instanceof HTMLDetailsElement) {
+                      details.open = false;
+                    }
+                  }}
+                  style={{
+                    width: '100%',
+                    textAlign: 'left',
+                    padding: '10px 12px',
+                    background: 'transparent',
+                    color: theme.text,
+                    border: 'none',
+                    borderTop: `1px solid ${theme.border}`,
+                    cursor: 'pointer',
+                    fontSize: '14px',
+                  }}
+                >
+                  .pptx
+                </button>
+              </div>
+            </details>
+          )}
+
           {/* Audio Recorder - ORIGINAL COMPONENT (key for working transcription) */}
           <AudioRecorder
             onTranscription={handleTranscription}

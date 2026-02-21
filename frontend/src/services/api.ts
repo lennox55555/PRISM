@@ -128,6 +128,23 @@ export async function transcribeAndGenerate(
   });
 }
 
+export interface SpeechSummaryResponse {
+  summary: string;
+  item_count: number;
+}
+
+/**
+ * generate a lightweight summary for user speech/text segments.
+ */
+export async function summarizeUserSpeech(
+  texts: string[]
+): Promise<SpeechSummaryResponse> {
+  return apiFetch<SpeechSummaryResponse>('/summarize-speech', {
+    method: 'POST',
+    body: JSON.stringify({ texts }),
+  });
+}
+
 /**
  * get a placeholder svg for loading states.
  */

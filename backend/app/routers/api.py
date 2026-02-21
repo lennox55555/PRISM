@@ -47,6 +47,19 @@ class TranscribeAndGenerateResponse(BaseModel):
     description: str
 
 
+class SpeechSummaryRequest(BaseModel):
+    """request body for speech summary generation."""
+
+    texts: list[str]
+
+
+class SpeechSummaryResponse(BaseModel):
+    """response body for speech summary generation."""
+
+    summary: str
+    item_count: int
+
+
 @router.post("/text-to-svg", response_model=SVGGenerationResponse)
 async def text_to_svg(request: TextToSVGRequest):
     """
@@ -192,6 +205,36 @@ async def transcribe_and_generate(request: TranscribeAndGenerateRequest):
         raise HTTPException(
             status_code=500,
             detail=f"processing failed: {str(e)}",
+        )
+
+
+@router.post("/summarize-speech", response_model=SpeechSummaryResponse)
+async def summarize_speech(request: SpeechSummaryRequest):
+    """
+    summarize a list of user speech/text segments with a small llm model.
+    """
+    try:
+        cleaned_texts = [text.strip() for text in request.texts if text and text.strip()]
+        if not cleaned_texts:
+            raise HTTPException(
+                status_code=400,
+                detail="no speech text provided",
+            )
+
+        llm_processor = LLMProcessor()
+        summary = await llm_processor.generate_brief_summary(cleaned_texts)
+
+        return SpeechSummaryResponse(
+            summary=summary,
+            item_count=len(cleaned_texts),
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"speech summary generation failed: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"summary generation failed: {str(e)}",
         )
 
 
