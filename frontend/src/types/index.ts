@@ -14,6 +14,7 @@ export enum MessageType {
   TRANSCRIPTION_PARTIAL = 'transcription_partial',
   TRANSCRIPTION_FINAL = 'transcription_final',
   SVG_GENERATED = 'svg_generated',
+  CHART_GENERATED = 'chart_generated',
   ERROR = 'error',
   STATUS = 'status',
 }
@@ -39,7 +40,23 @@ export interface SVGGenerationResponse {
   svg: string;
   description: string;
   originalText: string;
+  newTextDelta?: string;  // the new text that was compared for similarity
   error?: string;
+  generationMode?: 'initial' | 'enhanced' | 'new_topic' | 'chart';
+  similarityScore?: number | null;
+  similarityThreshold?: number;
+}
+
+// chart generation response from the backend (matplotlib)
+export interface ChartGenerationResponse {
+  image: string;  // base64 png image
+  code: string;   // matplotlib python code
+  description: string;
+  originalText: string;
+  newTextDelta?: string;
+  error?: string;
+  generationMode: 'chart';
+  chartConfidence?: number;
 }
 
 // recording state for the audio recorder component
@@ -52,6 +69,7 @@ export type ConnectionState = 'disconnected' | 'connecting' | 'connected' | 'err
 export interface WebSocketCallbacks {
   onTranscription?: (result: TranscriptionResult) => void;
   onSVGGenerated?: (response: SVGGenerationResponse) => void;
+  onChartGenerated?: (response: ChartGenerationResponse) => void;
   onError?: (error: string) => void;
   onStatusChange?: (status: string) => void;
   onConnectionChange?: (state: ConnectionState) => void;
@@ -61,6 +79,7 @@ export interface WebSocketCallbacks {
 export interface AudioRecorderProps {
   onTranscription?: (result: TranscriptionResult) => void;
   onSVGGenerated?: (response: SVGGenerationResponse) => void;
+  onChartGenerated?: (response: ChartGenerationResponse) => void;
   onError?: (error: string) => void;
   onRecordingStateChange?: (state: RecordingState) => void;
 }

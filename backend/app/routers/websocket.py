@@ -16,6 +16,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from app.services.speech_to_text import SpeechToTextService
 from app.services.llm_processor import LLMProcessor
 from app.services.svg_generator import SVGGenerator
+from app.services.chart_generator import ChartGenerator
 from app.models.schemas import (
     MessageType,
     WebSocketMessage,
@@ -24,6 +25,10 @@ from app.models.schemas import (
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+# trigger word to toggle visualization on/off
+# saying this word will start/stop svg generation
+TRIGGER_WORD = "orange"
 
 
 class ConnectionManager:
@@ -91,7 +96,8 @@ class AudioSessionHandler:
     handles a single audio recording session.
     manages the pipeline from audio input to svg output,
     coordinating between speech-to-text, llm, and svg services.
-    generates svg visualizations every 10 seconds during recording.
+    generates svg visualizations every 3 seconds during recording.
+    uses topic similarity detection to enhance or create new visualizations.
     """
 
     def __init__(self, websocket: WebSocket):
@@ -105,11 +111,27 @@ class AudioSessionHandler:
         self.stt_service = SpeechToTextService()
         self.llm_processor = LLMProcessor()
         self.svg_generator = SVGGenerator()
+        self.chart_generator = ChartGenerator()
 
         # session state
         self.is_recording = False
         self.is_connected = True
         self.accumulated_text = ""
+
+        # visualization state - controlled by trigger word
+        self.visualization_active = False
+        self.visualization_text = ""  # text accumulated since visualization started
+
+        # topic tracking for intelligent visualization updates
+        # stores the text that was used for the last svg generation
+        self.last_svg_text = ""
+        # stores the full context used for the last svg (for enhanced mode)
+        self.last_svg_context = ""
+        # stores the length of text at last svg generation (to extract delta)
+        self.last_text_length = 0
+        # similarity threshold for determining if topics match (0-1)
+        # lower = more likely to detect topic change
+        self.similarity_threshold = 0.70
 
         # audio buffer for accumulating wav chunks from frontend
         self.audio_chunks: list[bytes] = []
@@ -138,9 +160,16 @@ class AudioSessionHandler:
         initialize a new recording session.
         resets all buffers and state for a fresh recording.
         starts the periodic svg generation task.
+        visualization starts paused until trigger word is spoken.
         """
         self.is_recording = True
         self.accumulated_text = ""
+        self.visualization_active = False
+        self.visualization_text = ""
+        # reset topic tracking for new session
+        self.last_svg_text = ""
+        self.last_svg_context = ""
+        self.last_text_length = 0
         self.audio_chunks = []
         self.last_svg_generation_time = time.time()
         self.stt_service.reset()
@@ -151,15 +180,19 @@ class AudioSessionHandler:
         await self.send_message_safe(
             WebSocketMessage(
                 type=MessageType.STATUS,
-                data={"status": "recording_started"},
+                data={
+                    "status": "recording_started",
+                    "visualization_active": False,
+                    "trigger_word": TRIGGER_WORD,
+                },
             ),
         )
-        logger.info("recording session started")
+        logger.info(f"recording session started. say '{TRIGGER_WORD}' to start visualization")
 
     async def stop_recording(self):
         """
         finalize the recording session.
-        generates the final svg from accumulated text.
+        generates the final svg if visualization was active.
         """
         self.is_recording = False
 
@@ -171,14 +204,19 @@ class AudioSessionHandler:
             except asyncio.CancelledError:
                 pass
 
-        # generate final svg from accumulated text
-        if self.accumulated_text.strip():
-            await self._generate_and_send_svg()
+        # generate final svg if visualization was active and has text
+        if self.visualization_active and self.visualization_text.strip():
+            await self._generate_and_send_visualization()
+
+        self.visualization_active = False
 
         await self.send_message_safe(
             WebSocketMessage(
                 type=MessageType.STATUS,
-                data={"status": "recording_stopped"},
+                data={
+                    "status": "recording_stopped",
+                    "visualization_active": False,
+                },
             ),
         )
         logger.info("recording session stopped")
@@ -205,7 +243,7 @@ class AudioSessionHandler:
     async def _periodic_svg_generation(self):
         """
         background task that periodically generates svg.
-        runs while recording is active.
+        runs while recording is active and visualization is enabled.
         """
         try:
             while self.is_recording and self.is_connected:
@@ -213,11 +251,12 @@ class AudioSessionHandler:
 
                 current_time = time.time()
 
-                # check if it's time to generate svg
-                if current_time - self.last_svg_generation_time >= self.svg_generation_interval:
-                    if self.accumulated_text.strip():
-                        await self._generate_and_send_svg()
-                        self.last_svg_generation_time = current_time
+                # only generate svg if visualization is active
+                if self.visualization_active:
+                    if current_time - self.last_svg_generation_time >= self.svg_generation_interval:
+                        if self.visualization_text.strip():
+                            await self._generate_and_send_visualization()
+                            self.last_svg_generation_time = current_time
 
         except asyncio.CancelledError:
             logger.info("periodic svg generation task cancelled")
@@ -227,6 +266,7 @@ class AudioSessionHandler:
     async def _transcribe_audio(self, audio_data: bytes):
         """
         transcribe the provided wav audio data.
+        detects trigger word to toggle visualization on/off.
 
         args:
             audio_data: wav audio bytes from the client
@@ -264,8 +304,17 @@ class AudioSessionHandler:
                     logger.info(f"filtered out repeated word hallucination: {text}")
                     return
 
+                # check for trigger word to toggle visualization
+                text_to_add = await self._process_trigger_word(text)
+
+                # add to accumulated text (full transcription)
                 self.accumulated_text += " " + text
                 self.accumulated_text = self.accumulated_text.strip()
+
+                # add to visualization text if active and we have text to add
+                if self.visualization_active and text_to_add:
+                    self.visualization_text += " " + text_to_add
+                    self.visualization_text = self.visualization_text.strip()
 
                 # send transcription to client
                 await self.send_message_safe(
@@ -274,6 +323,8 @@ class AudioSessionHandler:
                         data={
                             "text": text,
                             "accumulated_text": self.accumulated_text,
+                            "visualization_text": self.visualization_text,
+                            "visualization_active": self.visualization_active,
                             "is_final": False,
                         },
                     ),
@@ -289,22 +340,216 @@ class AudioSessionHandler:
                 ),
             )
 
-    async def _generate_and_send_svg(self):
+    async def _process_trigger_word(self, text: str) -> str:
         """
-        generate svg from the accumulated transcription text.
-        sends the generated svg to the client.
+        check for trigger word and toggle visualization state.
+        returns the text with trigger word removed if found.
+
+        args:
+            text: transcribed text to check
+
+        returns:
+            text to add to visualization (with trigger word removed)
         """
-        if not self.accumulated_text.strip() or not self.is_connected:
+        lower_text = text.lower()
+
+        # check if trigger word is in the text
+        if TRIGGER_WORD in lower_text:
+            # toggle visualization state
+            self.visualization_active = not self.visualization_active
+
+            if self.visualization_active:
+                # starting visualization - clear previous visualization text and topic tracking
+                self.visualization_text = ""
+                # reset all topic tracking for fresh visualization session
+                self.last_svg_text = ""
+                self.last_svg_context = ""
+                self.last_text_length = 0
+                self.last_svg_generation_time = time.time()
+                logger.info(f"visualization STARTED (trigger word: {TRIGGER_WORD})")
+            else:
+                # stopping visualization
+                logger.info(f"visualization STOPPED (trigger word: {TRIGGER_WORD})")
+
+            # send status update to client
+            await self.send_message_safe(
+                WebSocketMessage(
+                    type=MessageType.STATUS,
+                    data={
+                        "status": "visualization_toggled",
+                        "visualization_active": self.visualization_active,
+                    },
+                ),
+            )
+
+            # remove the trigger word from the text
+            # split by trigger word and return the part after it (if starting)
+            # or the part before it (if stopping)
+            import re
+            parts = re.split(rf'\b{TRIGGER_WORD}\b', lower_text, flags=re.IGNORECASE)
+
+            if self.visualization_active and len(parts) > 1:
+                # return text after the trigger word
+                return parts[1].strip()
+            elif not self.visualization_active and len(parts) > 0:
+                # return text before the trigger word
+                return parts[0].strip()
+            return ""
+
+        # no trigger word found, return original text
+        return text
+
+    async def _generate_and_send_visualization(self):
+        """
+        generate visualization from the text (svg or chart).
+        first checks if the request is for a chart/analytical visualization.
+        - charts: always generate new (no similarity check), use matplotlib
+        - svg: use topic similarity to enhance or create new visualizations
+        sends the result to the client.
+        """
+        current_text = self.visualization_text.strip()
+        if not current_text or not self.is_connected:
             return
 
         try:
-            logger.info(f"generating svg for: {self.accumulated_text[:50]}...")
+            # extract only the NEW text since last generation
+            new_text_delta = current_text[self.last_text_length:].strip()
 
-            # create svg generation request
-            request = SVGGenerationRequest(text=self.accumulated_text.strip())
+            # if no new text, skip generation
+            if not new_text_delta and self.last_svg_text:
+                logger.info("no new text since last generation, skipping")
+                return
 
-            # generate svg using llm
-            response = await self.llm_processor.generate_svg(request)
+            # use full text if this is the first generation
+            if not new_text_delta:
+                new_text_delta = current_text
+
+            # check if this is a chart/analytical visualization request
+            is_chart, chart_confidence = await self.chart_generator.is_chart_request(new_text_delta)
+
+            if is_chart:
+                # generate chart - always new, no similarity check
+                await self._generate_and_send_chart(new_text_delta, current_text, chart_confidence)
+            else:
+                # generate svg with similarity checking
+                await self._generate_and_send_svg(new_text_delta, current_text)
+
+        except Exception as e:
+            logger.error(f"visualization generation error: {e}")
+            error_svg = self.svg_generator.create_error_svg(str(e))
+            await self.send_message_safe(
+                WebSocketMessage(
+                    type=MessageType.SVG_GENERATED,
+                    data={"svg": error_svg, "error": str(e)},
+                ),
+            )
+
+    async def _generate_and_send_chart(self, new_text_delta: str, current_text: str, confidence: float):
+        """
+        generate a matplotlib chart visualization.
+        charts always generate fresh - no similarity checking.
+
+        args:
+            new_text_delta: the new text to visualize
+            current_text: full accumulated text
+            confidence: confidence that this is a chart request
+        """
+        logger.info(f"generating chart (confidence: {confidence:.2f}) for: {new_text_delta[:50]}...")
+
+        # generate the chart
+        result = await self.chart_generator.generate_chart(new_text_delta)
+
+        if result["error"]:
+            logger.error(f"chart generation failed: {result['error']}")
+            # fall back to svg generation
+            await self._generate_and_send_svg(new_text_delta, current_text)
+            return
+
+        # update tracking (charts reset the context since they're always new)
+        self.last_svg_text = new_text_delta
+        self.last_text_length = len(current_text)
+        self.last_svg_context = new_text_delta
+
+        # send chart to client
+        await self.send_message_safe(
+            WebSocketMessage(
+                type=MessageType.CHART_GENERATED,
+                data={
+                    "image": result["image"],  # base64 png
+                    "code": result["code"],  # matplotlib code
+                    "description": result["description"],
+                    "original_text": new_text_delta,
+                    "new_text_delta": new_text_delta,
+                    "generation_mode": "chart",
+                    "chart_confidence": round(confidence, 3),
+                },
+            ),
+        )
+        logger.info("chart generated and sent")
+
+    async def _generate_and_send_svg(self, new_text_delta: str, current_text: str):
+        """
+        generate svg visualization with topic similarity checking.
+        compares the new text delta against previous visualization
+        to determine whether to enhance or create new.
+
+        args:
+            new_text_delta: the new text to compare/visualize
+            current_text: full accumulated text
+        """
+        try:
+            # track similarity info for the response
+            similarity_score = None
+            generation_mode = "initial"
+
+            # check if we have a previous visualization to compare against
+            if self.last_svg_text:
+                # compare ONLY the new delta against the previous svg text
+                is_similar, similarity_score = await self.llm_processor.check_topic_similarity(
+                    self.last_svg_text,
+                    new_text_delta,
+                    threshold=self.similarity_threshold
+                )
+
+                logger.info(
+                    f"comparing new delta: '{new_text_delta[:50]}...' "
+                    f"vs previous: '{self.last_svg_text[:50]}...' "
+                    f"= {similarity_score:.3f}"
+                )
+
+                if is_similar:
+                    # topics are similar - enhance the visualization
+                    logger.info(
+                        f"topic similar (score: {similarity_score:.3f}), "
+                        f"enhancing visualization with combined text"
+                    )
+                    response = await self.llm_processor.generate_enhanced_svg(
+                        previous_text=self.last_svg_context,
+                        new_text=new_text_delta,
+                    )
+                    generation_mode = "enhanced"
+                    self.last_svg_context = current_text
+                else:
+                    # topics are different - create fresh visualization
+                    logger.info(
+                        f"topic changed (score: {similarity_score:.3f}), "
+                        f"generating new visualization for new topic"
+                    )
+                    request = SVGGenerationRequest(text=new_text_delta)
+                    response = await self.llm_processor.generate_svg(request)
+                    generation_mode = "new_topic"
+                    self.last_svg_context = new_text_delta
+            else:
+                # no previous visualization - create initial one
+                logger.info(f"generating initial svg for: {current_text[:50]}...")
+                request = SVGGenerationRequest(text=current_text)
+                response = await self.llm_processor.generate_svg(request)
+                generation_mode = "initial"
+                self.last_svg_context = current_text
+
+            # update tracking for next comparison
+            self.last_svg_text = new_text_delta
+            self.last_text_length = len(current_text)
 
             # process and sanitize the svg
             processed_svg = self.svg_generator.process_svg(
@@ -318,7 +563,7 @@ class AudioSessionHandler:
                 processed_svg, animation_type="fade"
             )
 
-            # send to client
+            # send to client with full text and similarity info
             await self.send_message_safe(
                 WebSocketMessage(
                     type=MessageType.SVG_GENERATED,
@@ -326,10 +571,14 @@ class AudioSessionHandler:
                         "svg": animated_svg,
                         "description": response.description,
                         "original_text": response.original_text,
+                        "new_text_delta": new_text_delta,  # the new text being compared
+                        "generation_mode": generation_mode,
+                        "similarity_score": round(similarity_score, 3) if similarity_score is not None else None,
+                        "similarity_threshold": self.similarity_threshold,
                     },
                 ),
             )
-            logger.info("svg generated and sent")
+            logger.info(f"svg generated and sent (mode: {generation_mode}, similarity: {similarity_score})")
 
         except Exception as e:
             logger.error(f"svg generation error: {e}")

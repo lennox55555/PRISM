@@ -19,6 +19,7 @@ class MessageType(str, Enum):
     TRANSCRIPTION_PARTIAL = "transcription_partial"
     TRANSCRIPTION_FINAL = "transcription_final"
     SVG_GENERATED = "svg_generated"
+    CHART_GENERATED = "chart_generated"  # for matplotlib chart images
     ERROR = "error"
     STATUS = "status"
 
