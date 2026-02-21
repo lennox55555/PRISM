@@ -10,6 +10,7 @@ import {
   MessageType,
   TranscriptionResult,
   SVGGenerationResponse,
+  ChartGenerationResponse,
   WebSocketCallbacks,
 } from '../types';
 
@@ -51,6 +52,7 @@ export function useWebSocket(
     maxReconnectAttempts = 5,
     onTranscription,
     onSVGGenerated,
+    onChartGenerated,
     onError,
     onStatusChange,
     onConnectionChange,
@@ -71,6 +73,7 @@ export function useWebSocket(
   const callbacksRef = useRef({
     onTranscription,
     onSVGGenerated,
+    onChartGenerated,
     onError,
     onStatusChange,
     onConnectionChange,
@@ -81,11 +84,12 @@ export function useWebSocket(
     callbacksRef.current = {
       onTranscription,
       onSVGGenerated,
+      onChartGenerated,
       onError,
       onStatusChange,
       onConnectionChange,
     };
-  }, [onTranscription, onSVGGenerated, onError, onStatusChange, onConnectionChange]);
+  }, [onTranscription, onSVGGenerated, onChartGenerated, onError, onStatusChange, onConnectionChange]);
 
   // update connection state and notify callback
   const updateConnectionState = useCallback((state: ConnectionState) => {
@@ -119,9 +123,29 @@ export function useWebSocket(
               svg: data.svg || '',
               description: data.description || '',
               originalText: data.original_text || '',
+              newTextDelta: data.new_text_delta || '',
               error: data.error,
+              generationMode: data.generation_mode,
+              similarityScore: data.similarity_score,
+              similarityThreshold: data.similarity_threshold,
             };
             callbacksRef.current.onSVGGenerated?.(response);
+          }
+          break;
+
+        case MessageType.CHART_GENERATED:
+          if (data) {
+            const response: ChartGenerationResponse = {
+              image: data.image || '',
+              code: data.code || '',
+              description: data.description || '',
+              originalText: data.original_text || '',
+              newTextDelta: data.new_text_delta || '',
+              error: data.error,
+              generationMode: 'chart',
+              chartConfidence: data.chart_confidence,
+            };
+            callbacksRef.current.onChartGenerated?.(response);
           }
           break;
 
@@ -183,7 +207,7 @@ export function useWebSocket(
         isConnectingRef.current = false;
         if (!isUnmountedRef.current) {
           updateConnectionState('error');
-          callbacksRef.current.onError?.('websocket connection error');
+          // don't show error message to user - connection status badge is sufficient
         }
       };
 

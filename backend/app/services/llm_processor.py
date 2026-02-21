@@ -3,17 +3,38 @@ llm processor service module.
 handles communication with large language models to generate svg code
 from natural language descriptions. this module is responsible for
 constructing prompts, managing context, and parsing llm responses.
+includes topic similarity detection for intelligent visualization updates.
 """
 
 import logging
 import re
-from typing import Optional
+from typing import Optional, Tuple
 
 from app.config import get_settings
 from app.models.schemas import SVGGenerationRequest, SVGGenerationResponse
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
+
+
+# prompt for checking topic similarity between two text segments
+TOPIC_SIMILARITY_PROMPT = """you are a topic similarity analyzer. compare the two text segments below and determine if they are about the same general topic or theme.
+
+respond with exactly one of these two options:
+- "SIMILAR" - if the texts share the same general topic, theme, or subject matter (even if details differ)
+- "DIFFERENT" - if the texts are about distinctly different topics or themes
+
+examples:
+- "a red car driving fast" vs "a blue sports car on a highway" = SIMILAR (both about cars)
+- "a beautiful sunset over mountains" vs "cats playing with yarn" = DIFFERENT (nature scene vs animals)
+- "explaining machine learning algorithms" vs "neural networks and deep learning" = SIMILAR (both about AI/ML)
+- "cooking pasta with tomato sauce" vs "the history of ancient rome" = DIFFERENT (cooking vs history)
+
+text 1: {text1}
+
+text 2: {text2}
+
+your response (SIMILAR or DIFFERENT):"""
 
 # system prompt that instructs the llm on how to generate svg code
 # this prompt is crucial for getting consistent, valid svg output
@@ -150,6 +171,85 @@ class LLMProcessor:
   </text>
 </svg>"""
 
+    def _cosine_similarity(self, vec1: list[float], vec2: list[float]) -> float:
+        """
+        calculate cosine similarity between two vectors.
+
+        args:
+            vec1: first embedding vector
+            vec2: second embedding vector
+
+        returns:
+            cosine similarity score between 0 and 1
+        """
+        import math
+
+        dot_product = sum(a * b for a, b in zip(vec1, vec2))
+        magnitude1 = math.sqrt(sum(a * a for a in vec1))
+        magnitude2 = math.sqrt(sum(b * b for b in vec2))
+
+        if magnitude1 == 0 or magnitude2 == 0:
+            return 0.0
+
+        return dot_product / (magnitude1 * magnitude2)
+
+    async def check_topic_similarity(
+        self,
+        text1: str,
+        text2: str,
+        threshold: float = 0.75
+    ) -> Tuple[bool, float]:
+        """
+        check if two text segments are about the same topic using embeddings.
+        uses openai embeddings for fast semantic similarity comparison.
+        much faster and cheaper than using a full llm call.
+
+        args:
+            text1: first text segment (previous visualization text)
+            text2: second text segment (new text)
+            threshold: similarity threshold (0-1), above this is considered similar
+
+        returns:
+            tuple of (is_similar: bool, similarity_score: float)
+        """
+        if not self.client:
+            # fallback: simple word overlap check when client not available
+            words1 = set(text1.lower().split())
+            words2 = set(text2.lower().split())
+            overlap = len(words1 & words2) / max(len(words1 | words2), 1)
+            return overlap > 0.3, overlap
+
+        try:
+            # use openai embeddings model for fast similarity check
+            # text-embedding-3-small is fast and cost-effective
+            response = await self.client.embeddings.create(
+                model="text-embedding-3-small",
+                input=[text1, text2],
+            )
+
+            # extract embeddings
+            embedding1 = response.data[0].embedding
+            embedding2 = response.data[1].embedding
+
+            # calculate cosine similarity
+            similarity = self._cosine_similarity(embedding1, embedding2)
+            is_similar = similarity >= threshold
+
+            logger.info(
+                f"topic similarity (embeddings): '{text1[:30]}...' vs '{text2[:30]}...' "
+                f"= {similarity:.3f} ({'SIMILAR' if is_similar else 'DIFFERENT'})"
+            )
+
+            return is_similar, similarity
+
+        except Exception as e:
+            logger.error(f"embedding similarity check error: {e}")
+            # fallback to simple word overlap on error
+            words1 = set(text1.lower().split())
+            words2 = set(text2.lower().split())
+            overlap = len(words1 & words2) / max(len(words1 | words2), 1)
+            return overlap > 0.3, overlap
+
     async def generate_svg(self, request: SVGGenerationRequest) -> SVGGenerationResponse:
         """
         generate an svg visualization from the given text description.
@@ -182,7 +282,7 @@ class LLMProcessor:
 
             return SVGGenerationResponse(
                 svg_code=svg_code,
-                description=f"visualization generated for: {request.text[:100]}",
+                description=f"visualization generated for: {request.text}",
                 original_text=request.text,
             )
 
@@ -192,6 +292,79 @@ class LLMProcessor:
                 svg_code=self._create_fallback_svg(request.text, str(e)),
                 description=f"error generating visualization: {e}",
                 original_text=request.text,
+            )
+
+    async def generate_enhanced_svg(
+        self,
+        previous_text: str,
+        new_text: str,
+        style: Optional[str] = None
+    ) -> SVGGenerationResponse:
+        """
+        generate an enhanced svg that builds upon a previous visualization.
+        combines context from previous text with new details for a richer visualization.
+
+        args:
+            previous_text: text from the previous visualization
+            new_text: new text to incorporate
+            style: optional style preferences
+
+        returns:
+            svg generation response with enhanced visualization
+        """
+        if not self.client:
+            logger.warning("llm client not initialized, returning mock response")
+            combined_text = f"{previous_text} {new_text}"
+            return await self._generate_mock_svg(
+                SVGGenerationRequest(text=combined_text, style=style)
+            )
+
+        try:
+            # create an enhanced prompt that instructs the llm to evolve the visualization
+            enhanced_prompt = f"""create an enhanced svg visualization that evolves and builds upon the existing concept.
+
+previous context (base visualization theme):
+{previous_text}
+
+new details to incorporate:
+{new_text}
+
+instructions:
+- maintain the core visual theme from the previous context
+- add, enhance, or evolve elements based on the new details
+- create a cohesive visualization that combines both contexts
+- make the visualization more detailed and refined than a fresh start
+- if new details add specificity, incorporate those specific elements
+"""
+
+            if style:
+                enhanced_prompt += f"\nstyle preferences: {style}"
+
+            response = await self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": SVG_SYSTEM_PROMPT},
+                    {"role": "user", "content": enhanced_prompt},
+                ],
+                temperature=0.7,
+                max_tokens=2000,
+            )
+
+            svg_code = self._extract_svg(response.choices[0].message.content)
+            combined_text = f"{previous_text} + {new_text}"
+
+            return SVGGenerationResponse(
+                svg_code=svg_code,
+                description=f"enhanced visualization: {new_text}",
+                original_text=combined_text,
+            )
+
+        except Exception as e:
+            logger.error(f"enhanced svg generation error: {e}")
+            return SVGGenerationResponse(
+                svg_code=self._create_fallback_svg(new_text, str(e)),
+                description=f"error generating enhanced visualization: {e}",
+                original_text=new_text,
             )
 
     async def _generate_mock_svg(

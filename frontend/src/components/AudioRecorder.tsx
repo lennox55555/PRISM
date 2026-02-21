@@ -2,7 +2,7 @@
  * audio recorder component.
  * provides the main interface for starting and stopping voice recording.
  * displays recording state and audio level visualization.
- * this is the primary interaction point for users.
+ * features a modern design with animated waveform.
  */
 
 import { useCallback, useEffect } from 'react';
@@ -13,75 +13,130 @@ import {
   RecordingState,
   TranscriptionResult,
   SVGGenerationResponse,
+  ChartGenerationResponse,
 } from '../types';
 
-// styles for the component - your team can replace with proper styling
+// modern styles with dark theme
 const styles = {
   container: {
     display: 'flex',
     flexDirection: 'column' as const,
     alignItems: 'center',
-    gap: '1rem',
-    padding: '2rem',
+    gap: 'var(--spacing-lg)',
+    padding: 'var(--spacing-xl)',
+  },
+  buttonWrapper: {
+    position: 'relative' as const,
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  // outer glow ring that pulses when recording
+  glowRing: {
+    position: 'absolute' as const,
+    width: '120px',
+    height: '120px',
+    borderRadius: '50%',
+    background: 'var(--gradient-primary)',
+    opacity: 0.2,
+    animation: 'ripple 2s ease-out infinite',
   },
   button: {
-    padding: '1rem 2rem',
-    fontSize: '1.25rem',
-    fontWeight: 'bold' as const,
+    position: 'relative' as const,
+    width: '100px',
+    height: '100px',
+    borderRadius: '50%',
     border: 'none',
-    borderRadius: '0.5rem',
     cursor: 'pointer',
-    transition: 'all 0.2s ease',
-    minWidth: '200px',
+    transition: 'all var(--transition-normal)',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    boxShadow: 'var(--shadow-lg)',
+    zIndex: 1,
   },
-  recordButton: {
-    backgroundColor: '#ef4444',
-    color: 'white',
+  idleButton: {
+    background: 'var(--gradient-primary)',
   },
   recordingButton: {
-    backgroundColor: '#dc2626',
-    color: 'white',
-    animation: 'pulse 1.5s infinite',
+    background: 'linear-gradient(135deg, #ef4444 0%, #dc2626 100%)',
+    animation: 'glow 2s ease-in-out infinite',
   },
   disabledButton: {
-    backgroundColor: '#9ca3af',
-    color: 'white',
+    background: 'var(--color-bg-elevated)',
     cursor: 'not-allowed',
+    boxShadow: 'none',
+  },
+  buttonIcon: {
+    width: '32px',
+    height: '32px',
+    color: 'white',
+  },
+  stopIcon: {
+    width: '28px',
+    height: '28px',
+    backgroundColor: 'white',
+    borderRadius: 'var(--radius-sm)',
   },
   status: {
     fontSize: '0.875rem',
-    color: '#6b7280',
+    color: 'var(--color-text-secondary)',
+    fontWeight: '500' as const,
   },
-  levelMeter: {
-    width: '200px',
-    height: '8px',
-    backgroundColor: '#e5e7eb',
-    borderRadius: '4px',
-    overflow: 'hidden',
+  // audio level visualization
+  levelContainer: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '4px',
+    height: '40px',
+    padding: '0 var(--spacing-md)',
   },
-  levelFill: {
-    height: '100%',
-    backgroundColor: '#10b981',
-    transition: 'width 0.1s ease',
+  levelBar: {
+    width: '4px',
+    backgroundColor: 'var(--color-primary)',
+    borderRadius: 'var(--radius-full)',
+    transition: 'height 0.1s ease',
   },
-  connectionStatus: {
+  connectionBadge: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 'var(--spacing-xs)',
     fontSize: '0.75rem',
-    padding: '0.25rem 0.5rem',
-    borderRadius: '9999px',
+    fontWeight: '500' as const,
+    padding: 'var(--spacing-xs) var(--spacing-sm)',
+    borderRadius: 'var(--radius-full)',
+    transition: 'var(--transition-fast)',
   },
   connected: {
-    backgroundColor: '#d1fae5',
-    color: '#059669',
+    backgroundColor: 'var(--color-success-bg)',
+    color: 'var(--color-success)',
+    border: '1px solid rgba(16, 185, 129, 0.3)',
   },
   disconnected: {
-    backgroundColor: '#fee2e2',
-    color: '#dc2626',
+    backgroundColor: 'var(--color-error-bg)',
+    color: 'var(--color-error)',
+    border: '1px solid rgba(239, 68, 68, 0.3)',
+  },
+  connectionDot: {
+    width: '6px',
+    height: '6px',
+    borderRadius: '50%',
   },
 };
+
+// microphone icon component
+const MicrophoneIcon = () => (
+  <svg style={styles.buttonIcon} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z" />
+    <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+    <line x1="12" y1="19" x2="12" y2="22" />
+  </svg>
+);
 
 export function AudioRecorder({
   onTranscription,
   onSVGGenerated,
+  onChartGenerated,
   onError,
   onRecordingStateChange,
 }: AudioRecorderProps) {
@@ -97,6 +152,9 @@ export function AudioRecorder({
     },
     onSVGGenerated: (response: SVGGenerationResponse) => {
       onSVGGenerated?.(response);
+    },
+    onChartGenerated: (response: ChartGenerationResponse) => {
+      onChartGenerated?.(response);
     },
     onError: (error: string) => {
       onError?.(error);
@@ -143,72 +201,85 @@ export function AudioRecorder({
     wsStopRecording,
   ]);
 
-  // determine button state and text
-  const getButtonConfig = (state: RecordingState) => {
+  // determine button state
+  const getButtonStyle = (state: RecordingState) => {
     switch (state) {
       case 'recording':
-        return {
-          text: 'Stop Recording',
-          style: { ...styles.button, ...styles.recordingButton },
-          disabled: false,
-        };
+        return { ...styles.button, ...styles.recordingButton };
       case 'processing':
-        return {
-          text: 'Processing...',
-          style: { ...styles.button, ...styles.disabledButton },
-          disabled: true,
-        };
-      case 'error':
-        return {
-          text: 'Error - Try Again',
-          style: { ...styles.button, ...styles.recordButton },
-          disabled: false,
-        };
+        return { ...styles.button, ...styles.disabledButton };
       default:
-        return {
-          text: 'Start Recording',
-          style: { ...styles.button, ...styles.recordButton },
-          disabled: connectionState !== 'connected',
-        };
+        return { ...styles.button, ...styles.idleButton };
     }
   };
 
-  const buttonConfig = getButtonConfig(recordingState);
+  // generate audio level bars for visualization
+  const renderLevelBars = () => {
+    const barCount = 12;
+    const bars = [];
+    for (let i = 0; i < barCount; i++) {
+      // create varied heights based on audio level with some randomness
+      const baseHeight = audioLevel * 100;
+      const variance = Math.sin(Date.now() / 100 + i) * 20;
+      const height = Math.max(10, Math.min(100, baseHeight + variance));
+
+      bars.push(
+        <div
+          key={i}
+          style={{
+            ...styles.levelBar,
+            height: `${height}%`,
+            opacity: 0.4 + (audioLevel * 0.6),
+          }}
+        />
+      );
+    }
+    return bars;
+  };
+
   const isConnected = connectionState === 'connected';
+  const isRecording = recordingState === 'recording';
+  const isDisabled = recordingState === 'processing' || !isConnected;
 
   return (
     <div style={styles.container}>
-      {/* connection status indicator */}
+      {/* connection status badge */}
       <div
         style={{
-          ...styles.connectionStatus,
+          ...styles.connectionBadge,
           ...(isConnected ? styles.connected : styles.disconnected),
         }}
       >
-        {isConnected ? 'Connected' : 'Disconnected'}
+        <span
+          style={{
+            ...styles.connectionDot,
+            backgroundColor: isConnected ? 'var(--color-success)' : 'var(--color-error)',
+          }}
+        />
+        {isConnected ? 'connected' : 'disconnected'}
       </div>
 
-      {/* main record button */}
-      <button
-        onClick={handleRecordClick}
-        style={buttonConfig.style}
-        disabled={buttonConfig.disabled}
-        aria-label={
-          recordingState === 'recording' ? 'stop recording' : 'start recording'
-        }
-      >
-        {buttonConfig.text}
-      </button>
+      {/* main record button with glow effect */}
+      <div style={styles.buttonWrapper}>
+        {isRecording && <div style={styles.glowRing} />}
+        <button
+          onClick={handleRecordClick}
+          style={getButtonStyle(recordingState)}
+          disabled={isDisabled}
+          aria-label={isRecording ? 'stop recording' : 'start recording'}
+        >
+          {isRecording ? (
+            <div style={styles.stopIcon} />
+          ) : (
+            <MicrophoneIcon />
+          )}
+        </button>
+      </div>
 
-      {/* audio level meter - visible when recording */}
-      {recordingState === 'recording' && (
-        <div style={styles.levelMeter}>
-          <div
-            style={{
-              ...styles.levelFill,
-              width: `${audioLevel * 100}%`,
-            }}
-          />
+      {/* audio level visualization - visible when recording */}
+      {isRecording && (
+        <div style={styles.levelContainer}>
+          {renderLevelBars()}
         </div>
       )}
 
@@ -218,7 +289,7 @@ export function AudioRecorder({
           ? 'listening...'
           : recordingState === 'processing'
           ? 'processing your speech...'
-          : 'click to start recording'}
+          : 'tap to start recording'}
       </p>
     </div>
   );
