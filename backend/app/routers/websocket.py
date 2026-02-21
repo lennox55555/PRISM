@@ -116,7 +116,7 @@ class AudioSessionHandler:
         self.last_svg_generation_time = 0
 
         # timing configuration (in seconds)
-        self.svg_generation_interval = 10  # generate svg every 10 seconds
+        self.svg_generation_interval = 3  # generate svg every 3 seconds
 
         # background task for periodic svg generation
         self.processing_task: Optional[asyncio.Task] = None
