@@ -5,7 +5,7 @@
  * features a modern design with animated waveform.
  */
 
-import { useCallback, useEffect } from 'react';
+import { useCallback, useEffect, useRef } from 'react';
 import { useAudioRecorder } from '../hooks/useAudioRecorder';
 import { useWebSocket } from '../hooks/useWebSocket';
 import {
@@ -178,9 +178,15 @@ export function AudioRecorder({
   });
 
   // notify parent of recording state changes
+  // use a ref to store the callback to avoid re-running effect when callback reference changes
+  const onRecordingStateChangeRef = useRef(onRecordingStateChange);
   useEffect(() => {
-    onRecordingStateChange?.(recordingState);
-  }, [recordingState, onRecordingStateChange]);
+    onRecordingStateChangeRef.current = onRecordingStateChange;
+  }, [onRecordingStateChange]);
+
+  useEffect(() => {
+    onRecordingStateChangeRef.current?.(recordingState);
+  }, [recordingState]);
 
   // handle record button click
   const handleRecordClick = useCallback(async () => {

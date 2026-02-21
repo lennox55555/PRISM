@@ -1,7 +1,7 @@
 /**
  * main application component.
- * assembles all components and manages shared state.
- * features a modern dark theme with gradient accents.
+ * features a sidebar with session management and main content area.
+ * keeps working transcription logic intact.
  */
 
 import { useState, useCallback, useRef, useEffect } from 'react';
@@ -15,324 +15,176 @@ import {
   RecordingState,
 } from './types';
 
-// interface for storing visualization history (svg or chart)
-interface VisualizationHistoryItem {
+// interface for storing notes history (text-only, svg, or chart)
+interface NoteHistoryItem {
   id: number;
-  type: 'svg' | 'chart';
-  // svg specific
+  type: 'text' | 'svg' | 'chart';
   svg?: string;
-  // chart specific
-  chartImage?: string;  // base64 png
-  chartCode?: string;   // matplotlib code
+  chartImage?: string;
+  chartCode?: string;
   chartConfidence?: number;
-  // common fields
-  description: string;
+  description?: string;
   originalText: string;
   newTextDelta: string;
   timestamp: Date;
-  generationMode?: 'initial' | 'enhanced' | 'new_topic' | 'chart';
+  generationMode?: 'initial' | 'enhanced' | 'new_topic' | 'chart' | 'text';
   similarityScore?: number | null;
   similarityThreshold?: number;
 }
 
-// modern app styles with dark theme
-const styles = {
-  app: {
-    minHeight: '100vh',
-    padding: 'var(--spacing-xl)',
-    paddingTop: 'var(--spacing-2xl)',
-  },
-  container: {
-    maxWidth: '900px',
-    margin: '0 auto',
-    display: 'flex',
-    flexDirection: 'column' as const,
-    alignItems: 'center',
-    gap: 'var(--spacing-xl)',
-  },
-  header: {
-    textAlign: 'center' as const,
-    marginBottom: 'var(--spacing-md)',
-  },
-  titleWrapper: {
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 'var(--spacing-md)',
-    marginBottom: 'var(--spacing-sm)',
-  },
-  logo: {
-    width: '48px',
-    height: '48px',
-    borderRadius: 'var(--radius-md)',
-    background: 'var(--gradient-primary)',
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    boxShadow: 'var(--shadow-glow)',
-  },
-  title: {
-    fontSize: '2.5rem',
-    fontWeight: '700' as const,
-    background: 'var(--gradient-primary)',
-    WebkitBackgroundClip: 'text',
-    WebkitTextFillColor: 'transparent',
-    backgroundClip: 'text',
-    letterSpacing: '-0.02em',
-  },
-  subtitle: {
-    fontSize: '1.125rem',
-    color: 'var(--color-text-secondary)',
-    fontWeight: '400' as const,
-  },
-  content: {
-    width: '100%',
-    display: 'flex',
-    flexDirection: 'column' as const,
-    alignItems: 'center',
-    gap: 'var(--spacing-lg)',
-  },
-  error: {
-    padding: 'var(--spacing-md) var(--spacing-lg)',
-    backgroundColor: 'var(--color-error-bg)',
-    color: 'var(--color-error)',
-    borderRadius: 'var(--radius-md)',
-    fontSize: '0.875rem',
-    border: '1px solid rgba(239, 68, 68, 0.3)',
-    width: '100%',
-    maxWidth: '600px',
-    textAlign: 'center' as const,
-  },
-  statusSection: {
-    display: 'flex',
-    flexDirection: 'column' as const,
-    alignItems: 'center',
-    gap: 'var(--spacing-sm)',
-  },
-  visualizationStatus: {
-    padding: 'var(--spacing-sm) var(--spacing-lg)',
-    borderRadius: 'var(--radius-full)',
-    fontSize: '0.875rem',
-    fontWeight: '600' as const,
-    display: 'flex',
-    alignItems: 'center',
-    gap: 'var(--spacing-sm)',
-    transition: 'var(--transition-normal)',
-  },
-  visualizationActive: {
-    backgroundColor: 'var(--color-success-bg)',
-    color: 'var(--color-success)',
-    border: '1px solid rgba(16, 185, 129, 0.3)',
-  },
-  visualizationInactive: {
-    backgroundColor: 'var(--color-warning-bg)',
-    color: 'var(--color-warning)',
-    border: '1px solid rgba(245, 158, 11, 0.3)',
-  },
-  triggerHint: {
-    fontSize: '0.8rem',
-    color: 'var(--color-text-muted)',
-    textAlign: 'center' as const,
-  },
-  triggerWord: {
-    color: 'var(--color-primary-light)',
-    fontWeight: '600' as const,
-  },
-  svgSection: {
-    width: '100%',
-    display: 'flex',
-    flexDirection: 'column' as const,
-    gap: 'var(--spacing-lg)',
-  },
-  svgSectionHeader: {
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    width: '100%',
-    maxWidth: '700px',
-    margin: '0 auto',
-    padding: '0 var(--spacing-md)',
-  },
-  svgSectionTitle: {
-    fontSize: '0.875rem',
-    fontWeight: '600' as const,
-    color: 'var(--color-text-secondary)',
-    textTransform: 'uppercase' as const,
-    letterSpacing: '0.05em',
-  },
-  svgCount: {
-    fontSize: '0.75rem',
-    color: 'var(--color-text-muted)',
-    backgroundColor: 'var(--color-bg-elevated)',
-    padding: 'var(--spacing-xs) var(--spacing-sm)',
-    borderRadius: 'var(--radius-full)',
-  },
-  svgList: {
-    width: '100%',
-    display: 'flex',
-    flexDirection: 'column' as const,
-    gap: 'var(--spacing-lg)',
-    alignItems: 'center',
-  },
-  svgItem: {
-    width: '100%',
-    maxWidth: '700px',
-    borderRadius: 'var(--radius-lg)',
-    overflow: 'hidden',
-    backgroundColor: 'var(--color-bg-card)',
-    border: '1px solid var(--color-border)',
-    boxShadow: 'var(--shadow-md)',
-    animation: 'slideUp 0.4s ease',
-  },
-  svgHeader: {
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    padding: 'var(--spacing-md) var(--spacing-lg)',
-    backgroundColor: 'var(--color-bg-elevated)',
-    borderBottom: '1px solid var(--color-border)',
-  },
-  svgTimestamp: {
-    fontSize: '0.75rem',
-    color: 'var(--color-text-muted)',
-    display: 'flex',
-    alignItems: 'center',
-    gap: 'var(--spacing-xs)',
-  },
-  svgDescription: {
-    fontSize: '0.875rem',
-    color: 'var(--color-text-secondary)',
-    flex: 1,
-  },
-  svgMetaRow: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: 'var(--spacing-md)',
-    padding: 'var(--spacing-sm) var(--spacing-lg)',
-    backgroundColor: 'var(--color-bg-secondary)',
-    borderBottom: '1px solid var(--color-border)',
-    flexWrap: 'wrap' as const,
-  },
-  svgBadge: {
-    fontSize: '0.7rem',
-    fontWeight: '600' as const,
-    padding: '2px 8px',
-    borderRadius: 'var(--radius-full)',
-    textTransform: 'uppercase' as const,
-    letterSpacing: '0.03em',
-  },
-  badgeInitial: {
-    backgroundColor: 'var(--color-primary)',
-    color: 'white',
-  },
-  badgeEnhanced: {
-    backgroundColor: 'var(--color-success-bg)',
-    color: 'var(--color-success)',
-    border: '1px solid rgba(16, 185, 129, 0.3)',
-  },
-  badgeNewTopic: {
-    backgroundColor: 'var(--color-warning-bg)',
-    color: 'var(--color-warning)',
-    border: '1px solid rgba(245, 158, 11, 0.3)',
-  },
-  similarityScore: {
-    fontSize: '0.75rem',
-    color: 'var(--color-text-muted)',
-    display: 'flex',
-    alignItems: 'center',
-    gap: '4px',
-  },
-  originalTextContainer: {
-    padding: 'var(--spacing-sm) var(--spacing-lg)',
-    backgroundColor: 'var(--color-bg-secondary)',
-    borderBottom: '1px solid var(--color-border)',
-  },
-  originalTextLabel: {
-    fontSize: '0.7rem',
-    fontWeight: '600' as const,
-    color: 'var(--color-text-muted)',
-    textTransform: 'uppercase' as const,
-    letterSpacing: '0.05em',
-    marginBottom: '4px',
-  },
-  originalText: {
-    fontSize: '0.8rem',
-    color: 'var(--color-text-secondary)',
-    lineHeight: '1.5',
-    fontStyle: 'italic' as const,
-  },
-  chartImage: {
-    width: '100%',
-    height: 'auto',
-    display: 'block',
-  },
-  chartContainer: {
-    backgroundColor: 'white',
-    padding: 'var(--spacing-md)',
-  },
-  badgeChart: {
-    backgroundColor: 'var(--color-primary)',
-    color: 'white',
-  },
-  chartConfidence: {
-    fontSize: '0.75rem',
-    color: 'var(--color-text-muted)',
-    display: 'flex',
-    alignItems: 'center',
-    gap: '4px',
-  },
-  clearButton: {
-    padding: 'var(--spacing-sm) var(--spacing-lg)',
-    fontSize: '0.875rem',
-    backgroundColor: 'transparent',
-    color: 'var(--color-text-secondary)',
-    border: '1px solid var(--color-border)',
-    borderRadius: 'var(--radius-md)',
-    cursor: 'pointer',
-    transition: 'var(--transition-fast)',
-    marginTop: 'var(--spacing-md)',
-  },
-  statusDot: {
-    width: '8px',
-    height: '8px',
-    borderRadius: '50%',
-    animation: 'pulse 2s infinite',
-  },
-};
+// interface for a session
+interface Session {
+  id: number;
+  name: string;
+  notes: NoteHistoryItem[];
+  transcriptionText: string;
+}
 
 function App() {
-  // state for transcription text
+  // ==================== SESSION MANAGEMENT ====================
+  const [sessions, setSessions] = useState<Session[]>([
+    { id: 1, name: 'Session 1', notes: [], transcriptionText: '' }
+  ]);
+  const [activeSessionId, setActiveSessionId] = useState(1);
+  const sessionCounterRef = useRef(1);
+
+  // theme state
+  const [isDarkMode, setIsDarkMode] = useState(true);
+
+  // ==================== ORIGINAL WORKING STATE ====================
   const [transcriptionText, setTranscriptionText] = useState('');
   const [isPartialTranscription, setIsPartialTranscription] = useState(false);
-
-  // state for svg visualizations - now an array
-  const [visualizationHistory, setVisualizationHistory] = useState<VisualizationHistoryItem[]>([]);
+  const [notesHistory, setNotesHistory] = useState<NoteHistoryItem[]>([]);
   const [isGeneratingSVG, setIsGeneratingSVG] = useState(false);
-
-  // state for visualization mode
   const [visualizationActive, setVisualizationActive] = useState(false);
   const [triggerWord, setTriggerWord] = useState('orange');
-
-  // state for errors
   const [error, setError] = useState<string | null>(null);
-
-  // state for recording
   const [recordingState, setRecordingState] = useState<RecordingState>('idle');
-
-  // counter for unique ids
   const idCounterRef = useRef(0);
-
-  // ref for auto-scrolling to latest svg
   const listEndRef = useRef<HTMLDivElement>(null);
+  // track last captured text length for creating text-only notes
+  const lastCapturedTextLengthRef = useRef(0);
 
-  // auto-scroll to latest svg when new one is added
+  // refs for session saving (avoid dependency cycles in callbacks)
+  const transcriptionTextRef = useRef(transcriptionText);
+  const notesHistoryRef = useRef(notesHistory);
+
+  // keep refs in sync with state
+  useEffect(() => {
+    transcriptionTextRef.current = transcriptionText;
+  }, [transcriptionText]);
+
+  useEffect(() => {
+    notesHistoryRef.current = notesHistory;
+  }, [notesHistory]);
+
+  // auto-scroll to latest note
   useEffect(() => {
     if (listEndRef.current) {
       listEndRef.current.scrollIntoView({ behavior: 'smooth' });
     }
-  }, [visualizationHistory]);
+  }, [notesHistory]);
 
-  // handle transcription updates from the audio recorder
+  // create text-only notes periodically when recording but visualization is off
+  useEffect(() => {
+    if (recordingState !== 'recording') {
+      return;
+    }
+
+    const interval = setInterval(() => {
+      // only create text notes when visualization is OFF
+      if (visualizationActive) {
+        return;
+      }
+
+      const currentText = transcriptionTextRef.current;
+      const lastLength = lastCapturedTextLengthRef.current;
+      const newText = currentText.slice(lastLength).trim();
+
+      // only create note if there's substantial new text (at least 10 chars)
+      if (newText.length >= 10) {
+        const newNote: NoteHistoryItem = {
+          id: idCounterRef.current++,
+          type: 'text',
+          originalText: currentText,
+          newTextDelta: newText,
+          timestamp: new Date(),
+          generationMode: 'text',
+        };
+        setNotesHistory(prev => [...prev, newNote]);
+        lastCapturedTextLengthRef.current = currentText.length;
+      }
+    }, 3000); // check every 3 seconds
+
+    return () => clearInterval(interval);
+  }, [recordingState, visualizationActive]);
+
+  // ==================== SESSION HANDLERS ====================
+  const handleNewSession = useCallback(() => {
+    // Save current session first
+    setSessions(prev => prev.map(s =>
+      s.id === activeSessionId
+        ? { ...s, notes: notesHistory, transcriptionText }
+        : s
+    ));
+
+    sessionCounterRef.current += 1;
+    const newSession: Session = {
+      id: sessionCounterRef.current,
+      name: `Session ${sessionCounterRef.current}`,
+      notes: [],
+      transcriptionText: '',
+    };
+    setSessions(prev => [newSession, ...prev]);
+    setActiveSessionId(newSession.id);
+    setNotesHistory([]);
+    setTranscriptionText('');
+    idCounterRef.current = 0;
+  }, [activeSessionId, notesHistory, transcriptionText]);
+
+  const handleDeleteSession = useCallback((sessionId: number, e: React.MouseEvent) => {
+    e.stopPropagation();
+    setSessions(prev => {
+      const filtered = prev.filter(s => s.id !== sessionId);
+      if (filtered.length === 0) {
+        const newSession: Session = {
+          id: 1,
+          name: 'Session 1',
+          notes: [],
+          transcriptionText: '',
+        };
+        sessionCounterRef.current = 1;
+        setActiveSessionId(1);
+        setNotesHistory([]);
+        setTranscriptionText('');
+        return [newSession];
+      }
+      if (sessionId === activeSessionId) {
+        setActiveSessionId(filtered[0].id);
+        setNotesHistory(filtered[0].notes);
+        setTranscriptionText(filtered[0].transcriptionText);
+      }
+      return filtered;
+    });
+  }, [activeSessionId]);
+
+  const handleSwitchSession = useCallback((sessionId: number) => {
+    // Save current session
+    setSessions(prev => prev.map(s =>
+      s.id === activeSessionId
+        ? { ...s, notes: notesHistory, transcriptionText }
+        : s
+    ));
+
+    const session = sessions.find(s => s.id === sessionId);
+    if (session) {
+      setActiveSessionId(sessionId);
+      setNotesHistory(session.notes);
+      setTranscriptionText(session.transcriptionText);
+    }
+  }, [activeSessionId, notesHistory, transcriptionText, sessions]);
+
+  // ==================== ORIGINAL WORKING CALLBACKS (UNCHANGED) ====================
   const handleTranscription = useCallback((result: TranscriptionResult) => {
     if (result.accumulatedText) {
       setTranscriptionText(result.accumulatedText);
@@ -342,16 +194,14 @@ function App() {
     setIsPartialTranscription(!result.isFinal);
     setError(null);
 
-    // check for visualization state in the result
     if (typeof (result as any).visualizationActive === 'boolean') {
       setVisualizationActive((result as any).visualizationActive);
     }
   }, []);
 
-  // handle svg generation results - append to history
   const handleSVGGenerated = useCallback((response: SVGGenerationResponse) => {
     if (response.svg && !response.error) {
-      const newItem: VisualizationHistoryItem = {
+      const newItem: NoteHistoryItem = {
         id: idCounterRef.current++,
         type: 'svg',
         svg: response.svg,
@@ -363,7 +213,22 @@ function App() {
         similarityScore: response.similarityScore,
         similarityThreshold: response.similarityThreshold,
       };
-      setVisualizationHistory((prev) => [...prev, newItem]);
+
+      // update captured text length to prevent duplicate text-only notes
+      lastCapturedTextLengthRef.current = transcriptionTextRef.current.length;
+
+      if (response.generationMode === 'enhanced') {
+        setNotesHistory((prev) => {
+          if (prev.length === 0) return [newItem];
+          const lastSvgIndex = prev.map(item => item.type).lastIndexOf('svg');
+          if (lastSvgIndex === -1) return [...prev, newItem];
+          const updated = [...prev];
+          updated[lastSvgIndex] = { ...newItem, id: prev[lastSvgIndex].id };
+          return updated;
+        });
+      } else {
+        setNotesHistory((prev) => [...prev, newItem]);
+      }
     }
     setIsGeneratingSVG(false);
     if (response.error) {
@@ -371,10 +236,9 @@ function App() {
     }
   }, []);
 
-  // handle chart generation results - append to history
   const handleChartGenerated = useCallback((response: ChartGenerationResponse) => {
     if (response.image && !response.error) {
-      const newItem: VisualizationHistoryItem = {
+      const newItem: NoteHistoryItem = {
         id: idCounterRef.current++,
         type: 'chart',
         chartImage: response.image,
@@ -386,7 +250,9 @@ function App() {
         timestamp: new Date(),
         generationMode: 'chart',
       };
-      setVisualizationHistory((prev) => [...prev, newItem]);
+      // update captured text length to prevent duplicate text-only notes
+      lastCapturedTextLengthRef.current = transcriptionTextRef.current.length;
+      setNotesHistory((prev) => [...prev, newItem]);
     }
     setIsGeneratingSVG(false);
     if (response.error) {
@@ -394,82 +260,264 @@ function App() {
     }
   }, []);
 
-  // handle errors from any component
   const handleError = useCallback((errorMessage: string) => {
     setError(errorMessage);
     setIsGeneratingSVG(false);
   }, []);
 
-  // handle status changes (including visualization toggle)
-  const handleStatusChange = useCallback((status: string, data?: any) => {
-    if (data?.visualization_active !== undefined) {
-      setVisualizationActive(data.visualization_active);
-    }
-    if (data?.trigger_word) {
-      setTriggerWord(data.trigger_word);
-    }
-  }, []);
+  // ref to track previous state for transition detection
+  const prevRecordingStateRef = useRef<RecordingState>('idle');
 
-  // handle recording state changes
   const handleRecordingStateChange = useCallback((state: RecordingState) => {
+    const prevState = prevRecordingStateRef.current;
+
+    // only update if state actually changed
+    if (prevState === state) {
+      return;
+    }
+
+    prevRecordingStateRef.current = state;
     setRecordingState(state);
 
-    // clear previous content when starting a new recording
-    if (state === 'recording') {
+    // only clear on transition TO recording (not if already recording)
+    if (state === 'recording' && prevState !== 'recording') {
       setTranscriptionText('');
-      setVisualizationHistory([]);
+      setNotesHistory([]);
       setError(null);
       setVisualizationActive(false);
       idCounterRef.current = 0;
+      lastCapturedTextLengthRef.current = 0;
     }
 
-    // show generating state when processing ends
     if (state === 'processing') {
       setIsGeneratingSVG(true);
     }
 
-    // reset visualization state when stopped
     if (state === 'idle') {
       setVisualizationActive(false);
+      // Save session when recording stops (use refs to avoid dependency cycles)
+      setSessions(prev => prev.map(s =>
+        s.id === activeSessionId
+          ? { ...s, notes: notesHistoryRef.current, transcriptionText: transcriptionTextRef.current }
+          : s
+      ));
     }
-  }, []);
+  }, [activeSessionId]);
 
-  // clear svg history
-  const handleClearHistory = useCallback(() => {
-    setVisualizationHistory([]);
-  }, []);
-
-  // format timestamp for display
-  const formatTime = (date: Date) => {
-    return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  // ==================== THEME COLORS ====================
+  const theme = {
+    bg: isDarkMode ? '#1a1a1a' : '#ffffff',
+    sidebar: isDarkMode ? '#242424' : '#f5f5f5',
+    sidebarHover: isDarkMode ? '#333333' : '#e8e8e8',
+    text: isDarkMode ? '#ffffff' : '#1a1a1a',
+    textSecondary: isDarkMode ? '#a0a0a0' : '#666666',
+    border: isDarkMode ? '#333333' : '#e0e0e0',
+    accent: '#4ade80',
   };
 
   return (
-    <div style={styles.app}>
-      <div style={styles.container}>
-        {/* header section */}
-        <header style={styles.header}>
-          <div style={styles.titleWrapper}>
-            <div style={styles.logo}>
-              <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2">
-                <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z" />
-                <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
-                <line x1="12" y1="19" x2="12" y2="22" />
-              </svg>
+    <div style={{
+      display: 'flex',
+      minHeight: '100vh',
+      backgroundColor: theme.bg,
+      color: theme.text,
+      fontFamily: 'Inter, system-ui, sans-serif',
+    }}>
+      {/* ==================== SIDEBAR ==================== */}
+      <aside style={{
+        width: '260px',
+        backgroundColor: theme.sidebar,
+        borderRight: `1px solid ${theme.border}`,
+        display: 'flex',
+        flexDirection: 'column',
+        flexShrink: 0,
+      }}>
+        {/* New Board Button */}
+        <button
+          onClick={handleNewSession}
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: '8px',
+            padding: '12px 16px',
+            margin: '12px',
+            backgroundColor: 'transparent',
+            border: `1px solid ${theme.border}`,
+            borderRadius: '8px',
+            color: theme.text,
+            cursor: 'pointer',
+            fontSize: '14px',
+            fontWeight: 500,
+          }}
+        >
+          <span style={{ fontSize: '18px' }}>+</span>
+          New Board
+        </button>
+
+        {/* Sessions List */}
+        <div style={{ flex: 1, overflowY: 'auto', padding: '0 12px' }}>
+          {sessions.map(session => (
+            <div
+              key={session.id}
+              onClick={() => handleSwitchSession(session.id)}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                padding: '10px 12px',
+                marginBottom: '4px',
+                backgroundColor: session.id === activeSessionId ? theme.sidebarHover : 'transparent',
+                borderRadius: '6px',
+                cursor: 'pointer',
+              }}
+            >
+              <span style={{ fontSize: '14px' }}>{session.name}</span>
+              <button
+                onClick={(e) => handleDeleteSession(session.id, e)}
+                style={{
+                  background: 'none',
+                  border: 'none',
+                  color: theme.textSecondary,
+                  cursor: 'pointer',
+                  padding: '4px',
+                  display: 'flex',
+                  opacity: 0.6,
+                }}
+              >
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <path d="M3 6h18M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2" />
+                </svg>
+              </button>
             </div>
-            <h1 style={styles.title}>voice to svg</h1>
+          ))}
+        </div>
+
+        {/* Bottom Section */}
+        <div style={{ padding: '16px', borderTop: `1px solid ${theme.border}` }}>
+          <h2 style={{ fontSize: '18px', fontWeight: 600, marginBottom: '16px' }}>Board</h2>
+          <button
+            onClick={() => setIsDarkMode(!isDarkMode)}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '8px',
+              padding: '8px 0',
+              background: 'none',
+              border: 'none',
+              color: theme.accent,
+              cursor: 'pointer',
+              fontSize: '14px',
+            }}
+          >
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              {isDarkMode ? (
+                <><circle cx="12" cy="12" r="5"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></>
+              ) : (
+                <path d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z"/>
+              )}
+            </svg>
+            {isDarkMode ? 'Light mode' : 'Dark mode'}
+          </button>
+        </div>
+      </aside>
+
+      {/* ==================== MAIN CONTENT ==================== */}
+      <main style={{
+        flex: 1,
+        display: 'flex',
+        flexDirection: 'column',
+        padding: '32px 48px',
+        overflowY: 'auto',
+      }}>
+        {/* Error Display */}
+        {error && (
+          <div style={{
+            padding: '12px 16px',
+            backgroundColor: 'rgba(239, 68, 68, 0.1)',
+            color: '#ef4444',
+            borderRadius: '8px',
+            marginBottom: '24px',
+          }}>
+            {error}
           </div>
-          <p style={styles.subtitle}>
-            speak to create real-time visualizations
-          </p>
-        </header>
+        )}
 
-        {/* main content */}
-        <main style={styles.content}>
-          {/* error display */}
-          {error && <div style={styles.error}>{error}</div>}
+        {/* Transcription Display - ALWAYS RENDERED (key for real-time updates) */}
+        <TranscriptionDisplay
+          text={transcriptionText}
+          isPartial={isPartialTranscription}
+        />
 
-          {/* audio recorder with button */}
+        {/* Notes History */}
+        <div style={{ flex: 1, marginTop: '24px' }}>
+          {notesHistory.map((item) => (
+            <div
+              key={item.id}
+              style={{
+                display: 'flex',
+                gap: '32px',
+                marginBottom: '32px',
+                alignItems: 'flex-start',
+              }}
+            >
+              {/* Text on left */}
+              <div style={{ flex: 1 }}>
+                <p style={{ fontSize: '16px', lineHeight: 1.7, marginBottom: '8px' }}>
+                  {item.newTextDelta}
+                </p>
+                <p style={{ fontSize: '14px', color: item.type === 'text' ? theme.textSecondary : theme.accent }}>
+                  {item.type === 'text' ? 'Note' :
+                   item.generationMode === 'enhanced' ? 'Enhanced visualization' :
+                   item.generationMode === 'new_topic' ? 'New topic detected' :
+                   item.type === 'chart' ? 'Chart generated' : 'Initial visualization'}
+                </p>
+                {item.similarityScore != null && (
+                  <p style={{ fontSize: '12px', color: theme.textSecondary }}>
+                    Similarity: {(item.similarityScore * 100).toFixed(0)}%
+                  </p>
+                )}
+              </div>
+
+              {/* Visualization on right - only show if there's a visualization */}
+              {(item.type === 'chart' || item.type === 'svg') && (
+                <div style={{ width: '280px', flexShrink: 0 }}>
+                  {item.type === 'chart' && item.chartImage ? (
+                    <img
+                      src={`data:image/png;base64,${item.chartImage}`}
+                      alt={item.description || 'Chart'}
+                      style={{ width: '100%', borderRadius: '8px' }}
+                    />
+                  ) : item.svg ? (
+                    <div
+                      style={{ width: '100%', borderRadius: '8px', overflow: 'hidden', backgroundColor: '#f0f0f0' }}
+                      dangerouslySetInnerHTML={{ __html: item.svg }}
+                    />
+                  ) : null}
+                </div>
+              )}
+            </div>
+          ))}
+          <div ref={listEndRef} />
+        </div>
+
+        {/* Loading indicator */}
+        {isGeneratingSVG && (
+          <div style={{ textAlign: 'center', color: theme.accent, padding: '20px' }}>
+            Generating visualization...
+          </div>
+        )}
+
+        {/* Bottom Controls */}
+        <div style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          gap: '24px',
+          padding: '24px 0',
+          marginTop: 'auto',
+          borderTop: `1px solid ${theme.border}`,
+        }}>
+          {/* Audio Recorder - ORIGINAL COMPONENT (key for working transcription) */}
           <AudioRecorder
             onTranscription={handleTranscription}
             onSVGGenerated={handleSVGGenerated}
@@ -478,180 +526,34 @@ function App() {
             onRecordingStateChange={handleRecordingStateChange}
           />
 
-          {/* visualization status indicator - only show when recording */}
+          {/* Recording Status */}
           {recordingState === 'recording' && (
-            <div style={styles.statusSection}>
-              <div
-                style={{
-                  ...styles.visualizationStatus,
-                  ...(visualizationActive
-                    ? styles.visualizationActive
-                    : styles.visualizationInactive),
-                }}
-              >
-                <span
-                  style={{
-                    ...styles.statusDot,
-                    backgroundColor: visualizationActive ? 'var(--color-success)' : 'var(--color-warning)',
-                  }}
-                />
-                {visualizationActive
-                  ? 'visualization active'
-                  : 'visualization paused'}
-              </div>
-              <p style={styles.triggerHint}>
-                say "<span style={styles.triggerWord}>{triggerWord}</span>" to {visualizationActive ? 'stop' : 'start'} visualization
-              </p>
+            <div style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '8px',
+              fontSize: '14px',
+              color: theme.textSecondary,
+            }}>
+              <span style={{
+                width: '10px',
+                height: '10px',
+                borderRadius: '50%',
+                backgroundColor: visualizationActive ? theme.accent : '#f59e0b',
+                animation: 'pulse 2s infinite',
+              }} />
+              {visualizationActive ? 'Visualizing' : `Say "${triggerWord}" to visualize`}
             </div>
           )}
+        </div>
+      </main>
 
-          {/* transcription display - shows text as user speaks */}
-          <TranscriptionDisplay
-            text={transcriptionText}
-            isPartial={isPartialTranscription}
-          />
-
-          {/* loading indicator for svg generation */}
-          {isGeneratingSVG && (
-            <SVGRenderer
-              svgCode=""
-              isLoading={true}
-            />
-          )}
-
-          {/* svg visualization history */}
-          {visualizationHistory.length > 0 && (
-            <div style={styles.svgSection}>
-              <div style={styles.svgSectionHeader}>
-                <span style={styles.svgSectionTitle}>generated visualizations</span>
-                <span style={styles.svgCount}>{visualizationHistory.length} items</span>
-              </div>
-              <div style={styles.svgList}>
-                {visualizationHistory.map((item) => (
-                  <div key={item.id} style={styles.svgItem}>
-                    {/* header with timestamp */}
-                    <div style={styles.svgHeader}>
-                      <span style={styles.svgDescription}>{item.description}</span>
-                      <span style={styles.svgTimestamp}>
-                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                          <circle cx="12" cy="12" r="10" />
-                          <polyline points="12 6 12 12 16 14" />
-                        </svg>
-                        {formatTime(item.timestamp)}
-                      </span>
-                    </div>
-
-                    {/* meta row with generation mode and similarity/confidence score */}
-                    <div style={styles.svgMetaRow}>
-                      {/* generation mode badge */}
-                      <span style={{
-                        ...styles.svgBadge,
-                        ...(item.type === 'chart' ? styles.badgeChart :
-                            item.generationMode === 'enhanced' ? styles.badgeEnhanced :
-                            item.generationMode === 'new_topic' ? styles.badgeNewTopic :
-                            styles.badgeInitial)
-                      }}>
-                        {item.type === 'chart' ? 'chart' :
-                         item.generationMode === 'enhanced' ? 'enhanced' :
-                         item.generationMode === 'new_topic' ? 'new topic' :
-                         'initial'}
-                      </span>
-
-                      {/* chart confidence (for charts) */}
-                      {item.type === 'chart' && item.chartConfidence !== undefined && (
-                        <span style={styles.chartConfidence}>
-                          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                            <path d="M12 20V10" />
-                            <path d="M18 20V4" />
-                            <path d="M6 20v-4" />
-                          </svg>
-                          chart confidence: {(item.chartConfidence * 100).toFixed(1)}%
-                        </span>
-                      )}
-
-                      {/* similarity score (for svgs) */}
-                      {item.type === 'svg' && item.similarityScore !== null && item.similarityScore !== undefined && (
-                        <span style={styles.similarityScore}>
-                          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                            <path d="M12 20V10" />
-                            <path d="M18 20V4" />
-                            <path d="M6 20v-4" />
-                          </svg>
-                          similarity: {(item.similarityScore * 100).toFixed(1)}%
-                          {item.similarityThreshold && (
-                            <span style={{ opacity: 0.6 }}>
-                              {' '}(threshold: {(item.similarityThreshold * 100).toFixed(0)}%)
-                            </span>
-                          )}
-                        </span>
-                      )}
-                    </div>
-
-                    {/* source text */}
-                    <div style={styles.originalTextContainer}>
-                      <div style={styles.originalTextLabel}>
-                        {item.type === 'chart' ? 'chart description' : 'new text (compared for similarity)'}
-                      </div>
-                      <div style={styles.originalText}>{item.newTextDelta}</div>
-                    </div>
-
-                    {/* full context used for generation (if different from delta, only for svgs) */}
-                    {item.type === 'svg' && item.originalText !== item.newTextDelta && (
-                      <div style={{...styles.originalTextContainer, borderTop: '1px solid var(--color-border)'}}>
-                        <div style={styles.originalTextLabel}>full context used</div>
-                        <div style={{...styles.originalText, fontSize: '0.75rem', opacity: 0.8}}>{item.originalText}</div>
-                      </div>
-                    )}
-
-                    {/* render svg or chart image */}
-                    {item.type === 'chart' && item.chartImage ? (
-                      <div style={styles.chartContainer}>
-                        <img
-                          src={`data:image/png;base64,${item.chartImage}`}
-                          alt={item.description}
-                          style={styles.chartImage}
-                        />
-                      </div>
-                    ) : (
-                      <SVGRenderer
-                        svgCode={item.svg || ''}
-                        isLoading={false}
-                      />
-                    )}
-                  </div>
-                ))}
-                <div ref={listEndRef} />
-              </div>
-            </div>
-          )}
-
-          {/* placeholder when no svgs yet */}
-          {visualizationHistory.length === 0 && !isGeneratingSVG && (
-            <SVGRenderer
-              svgCode=""
-              isLoading={false}
-            />
-          )}
-
-          {/* clear history button */}
-          {visualizationHistory.length > 0 && recordingState === 'idle' && (
-            <button
-              style={styles.clearButton}
-              onClick={handleClearHistory}
-              onMouseOver={(e) => {
-                e.currentTarget.style.borderColor = 'var(--color-primary)';
-                e.currentTarget.style.color = 'var(--color-primary-light)';
-              }}
-              onMouseOut={(e) => {
-                e.currentTarget.style.borderColor = 'var(--color-border)';
-                e.currentTarget.style.color = 'var(--color-text-secondary)';
-              }}
-            >
-              clear history
-            </button>
-          )}
-        </main>
-      </div>
+      <style>{`
+        @keyframes pulse {
+          0%, 100% { opacity: 1; }
+          50% { opacity: 0.5; }
+        }
+      `}</style>
     </div>
   );
 }

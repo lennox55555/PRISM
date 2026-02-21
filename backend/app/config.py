@@ -19,6 +19,7 @@ class Settings(BaseSettings):
 
     # OpenAI / LLM Settings
     openai_api_key: str = ""
+    claude_key: str = ""  # optional anthropic claude api key
     llm_model: str = "gpt-4"
 
     # Speech-to-Text Settings

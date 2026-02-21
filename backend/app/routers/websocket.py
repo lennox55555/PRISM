@@ -127,6 +127,8 @@ class AudioSessionHandler:
         self.last_svg_text = ""
         # stores the full context used for the last svg (for enhanced mode)
         self.last_svg_context = ""
+        # stores the actual svg code from the last generation (for enhancement)
+        self.last_svg_code = ""
         # stores the length of text at last svg generation (to extract delta)
         self.last_text_length = 0
         # similarity threshold for determining if topics match (0-1)
@@ -169,6 +171,7 @@ class AudioSessionHandler:
         # reset topic tracking for new session
         self.last_svg_text = ""
         self.last_svg_context = ""
+        self.last_svg_code = ""
         self.last_text_length = 0
         self.audio_chunks = []
         self.last_svg_generation_time = time.time()
@@ -364,6 +367,7 @@ class AudioSessionHandler:
                 # reset all topic tracking for fresh visualization session
                 self.last_svg_text = ""
                 self.last_svg_context = ""
+                self.last_svg_code = ""
                 self.last_text_length = 0
                 self.last_svg_generation_time = time.time()
                 logger.info(f"visualization STARTED (trigger word: {TRIGGER_WORD})")
@@ -519,13 +523,15 @@ class AudioSessionHandler:
 
                 if is_similar:
                     # topics are similar - enhance the visualization
+                    # pass the previous svg code so llm can see and modify it
                     logger.info(
                         f"topic similar (score: {similarity_score:.3f}), "
-                        f"enhancing visualization with combined text"
+                        f"enhancing visualization with previous svg code"
                     )
                     response = await self.llm_processor.generate_enhanced_svg(
                         previous_text=self.last_svg_context,
                         new_text=new_text_delta,
+                        previous_svg=self.last_svg_code,  # pass the actual svg code
                     )
                     generation_mode = "enhanced"
                     self.last_svg_context = current_text
@@ -539,6 +545,7 @@ class AudioSessionHandler:
                     response = await self.llm_processor.generate_svg(request)
                     generation_mode = "new_topic"
                     self.last_svg_context = new_text_delta
+                    self.last_svg_code = ""  # clear previous svg for new topic
             else:
                 # no previous visualization - create initial one
                 logger.info(f"generating initial svg for: {current_text[:50]}...")
@@ -550,6 +557,8 @@ class AudioSessionHandler:
             # update tracking for next comparison
             self.last_svg_text = new_text_delta
             self.last_text_length = len(current_text)
+            # store the raw svg code for use in future enhancements
+            self.last_svg_code = response.svg_code
 
             # process and sanitize the svg
             processed_svg = self.svg_generator.process_svg(

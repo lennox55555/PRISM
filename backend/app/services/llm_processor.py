@@ -298,15 +298,18 @@ class LLMProcessor:
         self,
         previous_text: str,
         new_text: str,
+        previous_svg: Optional[str] = None,
         style: Optional[str] = None
     ) -> SVGGenerationResponse:
         """
         generate an enhanced svg that builds upon a previous visualization.
-        combines context from previous text with new details for a richer visualization.
+        when previous_svg is provided, the llm can see the actual svg code
+        and make more intelligent, targeted enhancements.
 
         args:
             previous_text: text from the previous visualization
             new_text: new text to incorporate
+            previous_svg: the actual svg code from the previous generation
             style: optional style preferences
 
         returns:
@@ -320,8 +323,31 @@ class LLMProcessor:
             )
 
         try:
-            # create an enhanced prompt that instructs the llm to evolve the visualization
-            enhanced_prompt = f"""create an enhanced svg visualization that evolves and builds upon the existing concept.
+            # build the enhanced prompt with svg code if available
+            if previous_svg:
+                # include the actual svg so the llm can see and modify it
+                enhanced_prompt = f"""enhance and evolve this existing svg visualization based on new details.
+
+EXISTING SVG CODE:
+{previous_svg}
+
+ORIGINAL DESCRIPTION:
+{previous_text}
+
+NEW DETAILS TO ADD:
+{new_text}
+
+INSTRUCTIONS:
+- analyze the existing svg structure and style
+- keep the same visual theme, colors, and overall layout
+- add new elements or modify existing ones to incorporate the new details
+- maintain svg validity and the same viewbox dimensions
+- enhance details, add depth, or expand the scene based on new information
+- output only the complete updated svg code
+"""
+            else:
+                # fallback to text-only prompt if no svg provided
+                enhanced_prompt = f"""create an enhanced svg visualization that evolves and builds upon the existing concept.
 
 previous context (base visualization theme):
 {previous_text}
@@ -352,6 +378,8 @@ instructions:
 
             svg_code = self._extract_svg(response.choices[0].message.content)
             combined_text = f"{previous_text} + {new_text}"
+
+            logger.info(f"enhanced svg generated (with previous_svg: {previous_svg is not None})")
 
             return SVGGenerationResponse(
                 svg_code=svg_code,
