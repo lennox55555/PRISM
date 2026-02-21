@@ -139,6 +139,7 @@ export function AudioRecorder({
   onChartGenerated,
   onError,
   onRecordingStateChange,
+  onRealtimeTranscript,
 }: AudioRecorderProps) {
   // websocket connection for real-time communication
   const {
@@ -174,6 +175,9 @@ export function AudioRecorder({
     },
     onError: (error: string) => {
       onError?.(error);
+    },
+    onRealtimeTranscript: (text: string, isFinal: boolean) => {
+      onRealtimeTranscript?.(text, isFinal);
     },
   });
 

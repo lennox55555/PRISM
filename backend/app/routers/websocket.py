@@ -26,9 +26,11 @@ from app.models.schemas import (
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-# trigger word to toggle visualization on/off
-# saying this word will start/stop svg generation
-TRIGGER_WORD = "orange"
+# trigger word to activate visualization
+# "prison" is included as it's often misheard for "prism"
+ACTIVATE_WORDS = ["prism", "prison"]
+# deactivation phrase to stop visualization
+DEACTIVATE_PHRASE = "thank you"
 
 
 class ConnectionManager:
@@ -121,6 +123,7 @@ class AudioSessionHandler:
         # visualization state - controlled by trigger word
         self.visualization_active = False
         self.visualization_text = ""  # text accumulated since visualization started
+        self.just_activated = False  # flag to prevent immediate deactivation in same chunk
 
         # topic tracking for intelligent visualization updates
         # stores the text that was used for the last svg generation
@@ -132,15 +135,15 @@ class AudioSessionHandler:
         # stores the length of text at last svg generation (to extract delta)
         self.last_text_length = 0
         # similarity threshold for determining if topics match (0-1)
-        # lower = more likely to detect topic change
-        self.similarity_threshold = 0.70
+        # lower = more lenient (topics considered similar more often)
+        self.similarity_threshold = 0.50
 
         # audio buffer for accumulating wav chunks from frontend
         self.audio_chunks: list[bytes] = []
         self.last_svg_generation_time = 0
 
         # timing configuration (in seconds)
-        self.svg_generation_interval = 3  # generate svg every 3 seconds
+        self.svg_generation_interval = 5  # generate svg every 5 seconds
 
         # background task for periodic svg generation
         self.processing_task: Optional[asyncio.Task] = None
@@ -186,11 +189,12 @@ class AudioSessionHandler:
                 data={
                     "status": "recording_started",
                     "visualization_active": False,
-                    "trigger_word": TRIGGER_WORD,
+                    "activate_word": "prism",
+                    "deactivate_phrase": DEACTIVATE_PHRASE,
                 },
             ),
         )
-        logger.info(f"recording session started. say '{TRIGGER_WORD}' to start visualization")
+        logger.info(f"recording session started. say 'prism' to start, '{DEACTIVATE_PHRASE}' to stop")
 
     async def stop_recording(self):
         """
@@ -345,35 +349,44 @@ class AudioSessionHandler:
 
     async def _process_trigger_word(self, text: str) -> str:
         """
-        check for trigger word and toggle visualization state.
-        returns the text with trigger word removed if found.
+        check for activation/deactivation words and update visualization state.
+        - "prism" or "prison" activates visualization (when off)
+        - "thank you" deactivates visualization (when on)
+        returns the text with trigger words removed and "prison" replaced with "prism".
 
         args:
             text: transcribed text to check
 
         returns:
-            text to add to visualization (with trigger word removed)
+            text to add to visualization (with trigger words removed)
         """
+        import re
         lower_text = text.lower()
 
-        # check if trigger word is in the text
-        if TRIGGER_WORD in lower_text:
-            # toggle visualization state
-            self.visualization_active = not self.visualization_active
+        # replace "prison" with "prism" in the original text for display
+        text = re.sub(r'\bprison\b', 'prism', text, flags=re.IGNORECASE)
+        lower_text = text.lower()
 
-            if self.visualization_active:
-                # starting visualization - clear previous visualization text and topic tracking
-                self.visualization_text = ""
-                # reset all topic tracking for fresh visualization session
-                self.last_svg_text = ""
-                self.last_svg_context = ""
-                self.last_svg_code = ""
-                self.last_text_length = 0
-                self.last_svg_generation_time = time.time()
-                logger.info(f"visualization STARTED (trigger word: {TRIGGER_WORD})")
-            else:
-                # stopping visualization
-                logger.info(f"visualization STOPPED (trigger word: {TRIGGER_WORD})")
+        # check for deactivation phrase first (when visualization is active)
+        # also check for "thankyou" without space as speech recognition sometimes merges it
+        # require at least 6 seconds after activation before allowing deactivation
+        # this ensures at least one SVG has time to generate
+        deactivate_patterns = [DEACTIVATE_PHRASE, "thankyou", "thanks"]
+        found_deactivate = None
+
+        time_since_activation = time.time() - self.last_svg_generation_time
+        can_deactivate = time_since_activation >= 6  # minimum 6 seconds before deactivation
+
+        if can_deactivate:
+            for pattern in deactivate_patterns:
+                if pattern in lower_text:
+                    found_deactivate = pattern
+                    break
+
+        if self.visualization_active and found_deactivate:
+            self.visualization_active = False
+            self.just_activated = False
+            logger.info(f"visualization STOPPED (deactivation phrase: {found_deactivate}, after {time_since_activation:.1f}s)")
 
             # send status update to client
             await self.send_message_safe(
@@ -386,21 +399,45 @@ class AudioSessionHandler:
                 ),
             )
 
-            # remove the trigger word from the text
-            # split by trigger word and return the part after it (if starting)
-            # or the part before it (if stopping)
-            import re
-            parts = re.split(rf'\b{TRIGGER_WORD}\b', lower_text, flags=re.IGNORECASE)
-
-            if self.visualization_active and len(parts) > 1:
-                # return text after the trigger word
-                return parts[1].strip()
-            elif not self.visualization_active and len(parts) > 0:
-                # return text before the trigger word
+            # return text before the deactivation phrase
+            parts = lower_text.split(found_deactivate)
+            if len(parts) > 0:
                 return parts[0].strip()
             return ""
 
-        # no trigger word found, return original text
+        # check for activation words (when visualization is not active)
+        if not self.visualization_active:
+            for activate_word in ACTIVATE_WORDS:
+                if activate_word in lower_text:
+                    self.visualization_active = True
+                    # starting visualization - clear previous visualization text and topic tracking
+                    self.visualization_text = ""
+                    # reset all topic tracking for fresh visualization session
+                    self.last_svg_text = ""
+                    self.last_svg_context = ""
+                    self.last_svg_code = ""
+                    self.last_text_length = 0
+                    self.last_svg_generation_time = time.time()
+                    logger.info(f"visualization STARTED (trigger word: {activate_word})")
+
+                    # send status update to client
+                    await self.send_message_safe(
+                        WebSocketMessage(
+                            type=MessageType.STATUS,
+                            data={
+                                "status": "visualization_toggled",
+                                "visualization_active": self.visualization_active,
+                            },
+                        ),
+                    )
+
+                    # return text after the trigger word (use "prism" for splitting since prison->prism)
+                    parts = re.split(r'\bprism\b', lower_text, flags=re.IGNORECASE)
+                    if len(parts) > 1:
+                        return parts[1].strip()
+                    return ""
+
+        # no trigger word found, return original text (with prison->prism replacement)
         return text
 
     async def _generate_and_send_visualization(self):

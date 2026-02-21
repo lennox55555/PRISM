@@ -82,6 +82,7 @@ export interface AudioRecorderProps {
   onChartGenerated?: (response: ChartGenerationResponse) => void;
   onError?: (error: string) => void;
   onRecordingStateChange?: (state: RecordingState) => void;
+  onRealtimeTranscript?: (text: string, isFinal: boolean) => void;
 }
 
 // props for the transcription display component

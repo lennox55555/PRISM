@@ -6,7 +6,6 @@
 
 import { useState, useCallback, useRef, useEffect } from 'react';
 import { AudioRecorder } from './components/AudioRecorder';
-import { TranscriptionDisplay } from './components/TranscriptionDisplay';
 import { SVGRenderer } from './components/SVGRenderer';
 import {
   TranscriptionResult,
@@ -53,11 +52,12 @@ function App() {
 
   // ==================== ORIGINAL WORKING STATE ====================
   const [transcriptionText, setTranscriptionText] = useState('');
-  const [isPartialTranscription, setIsPartialTranscription] = useState(false);
+  const [realtimeTranscript, setRealtimeTranscript] = useState('');
   const [notesHistory, setNotesHistory] = useState<NoteHistoryItem[]>([]);
   const [isGeneratingSVG, setIsGeneratingSVG] = useState(false);
   const [visualizationActive, setVisualizationActive] = useState(false);
-  const [triggerWord, setTriggerWord] = useState('orange');
+  const [triggerWord] = useState('prism');
+  const [deactivatePhrase] = useState('thank you');
   const [error, setError] = useState<string | null>(null);
   const [recordingState, setRecordingState] = useState<RecordingState>('idle');
   const idCounterRef = useRef(0);
@@ -114,7 +114,7 @@ function App() {
         setNotesHistory(prev => [...prev, newNote]);
         lastCapturedTextLengthRef.current = currentText.length;
       }
-    }, 3000); // check every 3 seconds
+    }, 5000); // check every 5 seconds
 
     return () => clearInterval(interval);
   }, [recordingState, visualizationActive]);
@@ -184,14 +184,16 @@ function App() {
     }
   }, [activeSessionId, notesHistory, transcriptionText, sessions]);
 
-  // ==================== ORIGINAL WORKING CALLBACKS (UNCHANGED) ====================
+  // ==================== TRANSCRIPTION CALLBACK ====================
   const handleTranscription = useCallback((result: TranscriptionResult) => {
+    // replace "prison" with "prism" (common misrecognition)
+    const cleanText = (text: string) => text.replace(/\bprison\b/gi, 'prism');
+
     if (result.accumulatedText) {
-      setTranscriptionText(result.accumulatedText);
+      setTranscriptionText(cleanText(result.accumulatedText));
     } else {
-      setTranscriptionText((prev) => prev + ' ' + result.text);
+      setTranscriptionText((prev) => prev + ' ' + cleanText(result.text));
     }
-    setIsPartialTranscription(!result.isFinal);
     setError(null);
 
     if (typeof (result as any).visualizationActive === 'boolean') {
@@ -265,6 +267,11 @@ function App() {
     setIsGeneratingSVG(false);
   }, []);
 
+  // handle real-time transcript from browser speech recognition
+  const handleRealtimeTranscript = useCallback((text: string, _isFinal: boolean) => {
+    setRealtimeTranscript(text);
+  }, []);
+
   // ref to track previous state for transition detection
   const prevRecordingStateRef = useRef<RecordingState>('idle');
 
@@ -282,6 +289,7 @@ function App() {
     // only clear on transition TO recording (not if already recording)
     if (state === 'recording' && prevState !== 'recording') {
       setTranscriptionText('');
+      setRealtimeTranscript('');
       setNotesHistory([]);
       setError(null);
       setVisualizationActive(false);
@@ -442,61 +450,96 @@ function App() {
           </div>
         )}
 
-        {/* Transcription Display - ALWAYS RENDERED (key for real-time updates) */}
-        <TranscriptionDisplay
-          text={transcriptionText}
-          isPartial={isPartialTranscription}
-        />
-
         {/* Notes History */}
         <div style={{ flex: 1, marginTop: '24px' }}>
-          {notesHistory.map((item) => (
+          {notesHistory.map((item, index) => {
+            const isLatest = index === notesHistory.length - 1 && recordingState === 'recording';
+            return (
+              <div
+                key={item.id}
+                style={{
+                  display: 'flex',
+                  gap: '32px',
+                  marginBottom: '32px',
+                  alignItems: 'flex-start',
+                  padding: isLatest ? '16px' : '0',
+                  backgroundColor: isLatest ? (isDarkMode ? 'rgba(74, 222, 128, 0.1)' : 'rgba(74, 222, 128, 0.15)') : 'transparent',
+                  border: isLatest ? `1px solid ${theme.accent}` : 'none',
+                  borderRadius: isLatest ? '8px' : '0',
+                }}
+              >
+                {/* Text on left */}
+                <div style={{ flex: 1 }}>
+                  <p style={{ fontSize: '16px', lineHeight: 1.7, marginBottom: '8px' }}>
+                    {item.newTextDelta}
+                  </p>
+                  <p style={{ fontSize: '14px', color: item.type === 'text' ? theme.textSecondary : theme.accent }}>
+                    {item.type === 'text' ? 'Note' :
+                     item.generationMode === 'enhanced' ? 'Enhanced visualization' :
+                     item.generationMode === 'new_topic' ? 'New topic detected' :
+                     item.type === 'chart' ? 'Chart generated' : 'Initial visualization'}
+                  </p>
+                  {item.similarityScore != null && (
+                    <p style={{ fontSize: '12px', color: theme.textSecondary }}>
+                      Similarity: {(item.similarityScore * 100).toFixed(0)}%
+                    </p>
+                  )}
+                </div>
+
+                {/* Visualization on right - only show if there's a visualization */}
+                {(item.type === 'chart' || item.type === 'svg') && (
+                  <div style={{ width: '280px', flexShrink: 0 }}>
+                    {item.type === 'chart' && item.chartImage ? (
+                      <img
+                        src={`data:image/png;base64,${item.chartImage}`}
+                        alt={item.description || 'Chart'}
+                        style={{ width: '100%', borderRadius: '8px' }}
+                      />
+                    ) : item.svg ? (
+                      <div
+                        style={{ width: '100%', borderRadius: '8px', overflow: 'hidden', backgroundColor: '#f0f0f0' }}
+                        dangerouslySetInnerHTML={{ __html: item.svg }}
+                      />
+                    ) : null}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+
+          {/* Live transcript as the current note being typed */}
+          {recordingState === 'recording' && realtimeTranscript && (
             <div
-              key={item.id}
               style={{
                 display: 'flex',
                 gap: '32px',
                 marginBottom: '32px',
                 alignItems: 'flex-start',
+                padding: '16px',
+                backgroundColor: isDarkMode ? 'rgba(74, 222, 128, 0.1)' : 'rgba(74, 222, 128, 0.15)',
+                border: `1px solid ${theme.accent}`,
+                borderRadius: '8px',
               }}
             >
-              {/* Text on left */}
               <div style={{ flex: 1 }}>
                 <p style={{ fontSize: '16px', lineHeight: 1.7, marginBottom: '8px' }}>
-                  {item.newTextDelta}
+                  {realtimeTranscript}
+                  <span style={{
+                    display: 'inline-block',
+                    width: '2px',
+                    height: '1em',
+                    backgroundColor: theme.accent,
+                    marginLeft: '4px',
+                    animation: 'pulse 1s infinite',
+                    verticalAlign: 'text-bottom',
+                  }} />
                 </p>
-                <p style={{ fontSize: '14px', color: item.type === 'text' ? theme.textSecondary : theme.accent }}>
-                  {item.type === 'text' ? 'Note' :
-                   item.generationMode === 'enhanced' ? 'Enhanced visualization' :
-                   item.generationMode === 'new_topic' ? 'New topic detected' :
-                   item.type === 'chart' ? 'Chart generated' : 'Initial visualization'}
+                <p style={{ fontSize: '14px', color: theme.accent }}>
+                  Listening...
                 </p>
-                {item.similarityScore != null && (
-                  <p style={{ fontSize: '12px', color: theme.textSecondary }}>
-                    Similarity: {(item.similarityScore * 100).toFixed(0)}%
-                  </p>
-                )}
               </div>
-
-              {/* Visualization on right - only show if there's a visualization */}
-              {(item.type === 'chart' || item.type === 'svg') && (
-                <div style={{ width: '280px', flexShrink: 0 }}>
-                  {item.type === 'chart' && item.chartImage ? (
-                    <img
-                      src={`data:image/png;base64,${item.chartImage}`}
-                      alt={item.description || 'Chart'}
-                      style={{ width: '100%', borderRadius: '8px' }}
-                    />
-                  ) : item.svg ? (
-                    <div
-                      style={{ width: '100%', borderRadius: '8px', overflow: 'hidden', backgroundColor: '#f0f0f0' }}
-                      dangerouslySetInnerHTML={{ __html: item.svg }}
-                    />
-                  ) : null}
-                </div>
-              )}
             </div>
-          ))}
+          )}
           <div ref={listEndRef} />
         </div>
 
@@ -524,6 +567,7 @@ function App() {
             onChartGenerated={handleChartGenerated}
             onError={handleError}
             onRecordingStateChange={handleRecordingStateChange}
+            onRealtimeTranscript={handleRealtimeTranscript}
           />
 
           {/* Recording Status */}
@@ -542,7 +586,7 @@ function App() {
                 backgroundColor: visualizationActive ? theme.accent : '#f59e0b',
                 animation: 'pulse 2s infinite',
               }} />
-              {visualizationActive ? 'Visualizing' : `Say "${triggerWord}" to visualize`}
+              {visualizationActive ? `Visualizing - say "${deactivatePhrase}" to stop` : `Say "${triggerWord}" to visualize`}
             </div>
           )}
         </div>

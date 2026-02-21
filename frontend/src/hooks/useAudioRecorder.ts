@@ -14,6 +14,8 @@ interface UseAudioRecorderOptions {
   onStateChange?: (state: RecordingState) => void;
   // callback when an error occurs
   onError?: (error: string) => void;
+  // callback for real-time transcription (browser speech recognition)
+  onRealtimeTranscript?: (text: string, isFinal: boolean) => void;
   // interval for sending audio chunks in ms
   chunkInterval?: number;
 }
@@ -29,6 +31,8 @@ interface UseAudioRecorderReturn {
   checkMicrophoneAccess: () => Promise<boolean>;
   // current audio level (0-1) for visualization
   audioLevel: number;
+  // current real-time transcript
+  realtimeTranscript: string;
 }
 
 /**
@@ -104,6 +108,30 @@ function arrayBufferToBase64(buffer: ArrayBuffer): string {
   return btoa(binary);
 }
 
+// Web Speech API types
+interface SpeechRecognitionEvent extends Event {
+  results: SpeechRecognitionResultList;
+  resultIndex: number;
+}
+
+interface SpeechRecognitionResultList {
+  length: number;
+  item(index: number): SpeechRecognitionResult;
+  [index: number]: SpeechRecognitionResult;
+}
+
+interface SpeechRecognitionResult {
+  isFinal: boolean;
+  length: number;
+  item(index: number): SpeechRecognitionAlternative;
+  [index: number]: SpeechRecognitionAlternative;
+}
+
+interface SpeechRecognitionAlternative {
+  transcript: string;
+  confidence: number;
+}
+
 export function useAudioRecorder(
   options: UseAudioRecorderOptions = {}
 ): UseAudioRecorderReturn {
@@ -111,12 +139,14 @@ export function useAudioRecorder(
     onAudioData,
     onStateChange,
     onError,
-    chunkInterval = 3000, // send chunks every 3 seconds to match backend
+    onRealtimeTranscript,
+    chunkInterval = 2000, // send chunks every 2 seconds for faster transcription
   } = options;
 
   // state
   const [recordingState, setRecordingState] = useState<RecordingState>('idle');
   const [audioLevel, setAudioLevel] = useState(0);
+  const [realtimeTranscript, setRealtimeTranscript] = useState('');
 
   // refs for recording resources
   const mediaStreamRef = useRef<MediaStream | null>(null);
@@ -127,6 +157,7 @@ export function useAudioRecorder(
   const audioBufferRef = useRef<Float32Array[]>([]);
   const chunkIntervalRef = useRef<ReturnType<typeof setInterval>>();
   const isRecordingRef = useRef(false);
+  const speechRecognitionRef = useRef<any>(null);
 
   // update state and notify callback
   const updateState = useCallback(
@@ -256,6 +287,74 @@ export function useAudioRecorder(
       // set up interval to send chunks
       chunkIntervalRef.current = setInterval(processAndSendAudio, chunkInterval);
 
+      // start browser speech recognition for real-time transcript
+      const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+      if (SpeechRecognition) {
+        console.log('Starting browser speech recognition...');
+        const recognition = new SpeechRecognition();
+        recognition.continuous = true;
+        recognition.interimResults = true;
+        recognition.lang = 'en-US';
+        recognition.maxAlternatives = 1;
+
+        let finalTranscript = '';
+
+        recognition.onresult = (event: SpeechRecognitionEvent) => {
+          let interimTranscript = '';
+
+          for (let i = event.resultIndex; i < event.results.length; i++) {
+            const result = event.results[i];
+            // Replace "prison" with "prism"
+            const transcript = result[0].transcript.replace(/\bprison\b/gi, 'prism');
+
+            if (result.isFinal) {
+              finalTranscript += transcript + ' ';
+              onRealtimeTranscript?.(finalTranscript.trim(), true);
+            } else {
+              interimTranscript += transcript;
+            }
+          }
+
+          // Update display with final + interim
+          const fullTranscript = (finalTranscript + interimTranscript).trim();
+          setRealtimeTranscript(fullTranscript);
+          if (interimTranscript) {
+            onRealtimeTranscript?.(fullTranscript, false);
+          }
+        };
+
+        recognition.onerror = (event: any) => {
+          console.warn('Speech recognition error:', event.error);
+          // Restart on certain errors
+          if (event.error === 'no-speech' || event.error === 'aborted') {
+            if (isRecordingRef.current) {
+              try {
+                recognition.start();
+              } catch (e) {
+                // Already started
+              }
+            }
+          }
+        };
+
+        recognition.onend = () => {
+          // Restart if still recording
+          if (isRecordingRef.current) {
+            try {
+              recognition.start();
+            } catch (e) {
+              // Already started
+            }
+          }
+        };
+
+        recognition.start();
+        speechRecognitionRef.current = recognition;
+        console.log('Browser speech recognition started successfully');
+      } else {
+        console.warn('Browser speech recognition not available - using backend transcription only');
+      }
+
     } catch (error) {
       isRecordingRef.current = false;
       if (error instanceof DOMException && error.name === 'NotAllowedError') {
@@ -272,6 +371,12 @@ export function useAudioRecorder(
   const stopRecording = useCallback(() => {
     isRecordingRef.current = false;
     updateState('processing');
+
+    // stop speech recognition
+    if (speechRecognitionRef.current) {
+      speechRecognitionRef.current.stop();
+      speechRecognitionRef.current = null;
+    }
 
     // clear chunk interval
     if (chunkIntervalRef.current) {
@@ -305,8 +410,9 @@ export function useAudioRecorder(
       audioContextRef.current = null;
     }
 
-    // reset audio level
+    // reset audio level and transcript
     setAudioLevel(0);
+    setRealtimeTranscript('');
 
     // update state after brief delay
     setTimeout(() => {
@@ -320,5 +426,6 @@ export function useAudioRecorder(
     stopRecording,
     checkMicrophoneAccess,
     audioLevel,
+    realtimeTranscript,
   };
 }
