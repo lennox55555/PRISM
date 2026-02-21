@@ -57,14 +57,6 @@ function sanitizeFilename(input: string): string {
     .slice(0, 60) || 'session';
 }
 
-function splitIntoChunks(items: string[], chunkSize: number): string[][] {
-  const chunks: string[][] = [];
-  for (let i = 0; i < items.length; i += chunkSize) {
-    chunks.push(items.slice(i, i + chunkSize));
-  }
-  return chunks;
-}
-
 async function svgMarkupToPngDataUrl(
   svgMarkup: string,
   width = 1600,
@@ -616,11 +608,14 @@ function App() {
     const visualizationItems = notesHistory.filter(
       (item) => item.type === 'svg' || item.type === 'chart'
     );
+    const cleanSpeechTexts = allUserSpeechTexts
+      .map((text) => text.replace(/\s+/g, ' ').trim())
+      .filter((text) => text.length > 0);
 
     let llmSummary = 'Summary unavailable.';
-    if (allUserSpeechTexts.length > 0) {
+    if (cleanSpeechTexts.length > 0) {
       try {
-        const summaryResponse = await summarizeUserSpeech(allUserSpeechTexts);
+        const summaryResponse = await summarizeUserSpeech(cleanSpeechTexts);
         if (summaryResponse.summary && summaryResponse.summary.trim().length > 0) {
           llmSummary = summaryResponse.summary.trim();
         }
@@ -636,67 +631,258 @@ function App() {
       pptx.company = 'PRISM';
       pptx.subject = 'Voice Session Export';
       pptx.title = `Session ${activeSessionId} Export`;
+      const palette = {
+        bg: 'F8FAFC',
+        surface: 'FFFFFF',
+        ink: '0F172A',
+        muted: '475569',
+        accent: '334155',
+        accentSoft: 'F1F5F9',
+        border: 'E2E8F0',
+      };
+      const deckName = activeSession?.name ?? `Session ${activeSessionId}`;
+      const exportedAt = new Date().toLocaleString();
+      let slideNumber = 0;
+
+      const addSlideChrome = (slide: any, title: string, subtitle?: string) => {
+        slideNumber += 1;
+        slide.background = { color: palette.bg };
+        slide.addShape(pptx.ShapeType.rect, {
+          x: 0,
+          y: 0,
+          w: 13.33,
+          h: 0.95,
+          fill: { color: palette.accent },
+          line: { color: palette.accent, pt: 0 },
+        });
+        slide.addText(title, {
+          x: 0.55,
+          y: 0.20,
+          w: 9.4,
+          h: 0.45,
+          fontFace: 'Aptos Display',
+          fontSize: 24,
+          bold: true,
+          color: 'FFFFFF',
+          fit: 'shrink',
+        });
+        if (subtitle) {
+          slide.addText(subtitle, {
+            x: 0.55,
+            y: 0.64,
+            w: 9.8,
+            h: 0.22,
+            fontFace: 'Aptos',
+            fontSize: 11,
+            color: 'E0E7FF',
+            fit: 'shrink',
+          });
+        }
+
+        slide.addText(`${deckName}  •  Slide ${slideNumber}`, {
+          x: 9.5,
+          y: 0.26,
+          w: 3.3,
+          h: 0.24,
+          fontFace: 'Aptos',
+          fontSize: 11,
+          color: 'E0E7FF',
+          align: 'right',
+          fit: 'shrink',
+        });
+
+        slide.addShape(pptx.ShapeType.rect, {
+          x: 0.45,
+          y: 7.1,
+          w: 12.4,
+          h: 0.02,
+          fill: { color: palette.border },
+          line: { color: palette.border, pt: 0 },
+        });
+      };
+
+      const addMetricCard = (
+        slide: any,
+        label: string,
+        value: string,
+        x: number
+      ) => {
+        slide.addShape(pptx.ShapeType.roundRect, {
+          x,
+          y: 2.6,
+          w: 2.9,
+          h: 1.3,
+          fill: { color: palette.surface },
+          line: { color: palette.border, pt: 1.2 },
+          shadow: { type: 'outer', color: 'BFC7DB', blur: 2, angle: 45, distance: 1, opacity: 0.2 },
+        });
+        slide.addText(label, {
+          x: x + 0.2,
+          y: 2.82,
+          w: 2.5,
+          h: 0.26,
+          fontFace: 'Aptos',
+          fontSize: 11,
+          color: '64748B',
+          align: 'center',
+          fit: 'shrink',
+        });
+        slide.addText(value, {
+          x: x + 0.2,
+          y: 3.08,
+          w: 2.5,
+          h: 0.46,
+          fontFace: 'Aptos Display',
+          fontSize: 26,
+          bold: true,
+          color: palette.ink,
+          align: 'center',
+          fit: 'shrink',
+        });
+      };
 
       // title slide
       const titleSlide = pptx.addSlide();
-      titleSlide.background = { color: 'F8FAFC' };
-      titleSlide.addText('PRISM Session Export', {
-        x: 0.6,
-        y: 0.5,
-        w: 12.2,
-        h: 0.6,
-        fontSize: 30,
+      addSlideChrome(titleSlide, 'PRISM Session Export', `Exported ${exportedAt}`);
+      titleSlide.addText(deckName, {
+        x: 0.62,
+        y: 1.4,
+        w: 8.6,
+        h: 0.7,
+        fontFace: 'Aptos Display',
+        fontSize: 38,
         bold: true,
-        color: '0F172A',
+        color: palette.ink,
+        fit: 'shrink',
       });
       titleSlide.addText(
-        `Session: ${activeSession?.name ?? `Session ${activeSessionId}`}\n` +
-          `Exported: ${new Date().toLocaleString()}\n` +
-          `Speech Items: ${allUserSpeechTexts.length}\n` +
-          `SVG Items: ${allSessionSVGs.length}\n` +
-          `Visualization Items: ${visualizationItems.length}`,
+        'Voice notes, generated visuals, and an LLM summary organized for presentation.',
         {
-          x: 0.6,
-          y: 1.5,
-          w: 6.8,
-          h: 2.4,
+          x: 0.65,
+          y: 2.1,
+          w: 8.2,
+          h: 0.55,
+          fontFace: 'Aptos',
           fontSize: 15,
-          color: '334155',
-          valign: 'top',
-          breakLine: true,
+          color: palette.muted,
+          fit: 'shrink',
         }
       );
+      addMetricCard(titleSlide, 'Speech Segments', `${cleanSpeechTexts.length}`, 0.65);
+      addMetricCard(titleSlide, 'SVG Outputs', `${allSessionSVGs.length}`, 3.8);
+      addMetricCard(titleSlide, 'Visual Items', `${visualizationItems.length}`, 6.95);
 
       // speech slides
-      if (allUserSpeechTexts.length > 0) {
-        const speechChunks = splitIntoChunks(allUserSpeechTexts, 6);
-        speechChunks.forEach((chunk, chunkIndex) => {
+      if (cleanSpeechTexts.length > 0) {
+        const numberedSpeech = cleanSpeechTexts.map(
+          (text, index) => `${index + 1}. ${text}`
+        );
+        const maxOverviewSlides = 2;
+        const maxCharsPerSlide = 3200;
+        const speechOverviewPages: string[] = [];
+        let currentPage = '';
+
+        for (let i = 0; i < numberedSpeech.length; i += 1) {
+          const entry = numberedSpeech[i];
+          const candidate = currentPage ? `${currentPage}\n\n${entry}` : entry;
+
+          if (candidate.length <= maxCharsPerSlide) {
+            currentPage = candidate;
+            continue;
+          }
+
+          if (speechOverviewPages.length < maxOverviewSlides - 1) {
+            speechOverviewPages.push(currentPage);
+            currentPage = entry;
+            continue;
+          }
+
+          const remainingEntries = numberedSpeech.length - i;
+          if (currentPage.length > 0) {
+            currentPage += `\n\n…plus ${remainingEntries} more entries in session history.`;
+          } else {
+            currentPage = `${entry}\n\n…plus ${Math.max(0, remainingEntries - 1)} more entries in session history.`;
+          }
+          break;
+        }
+
+        if (currentPage.length > 0) {
+          speechOverviewPages.push(currentPage);
+        }
+
+        speechOverviewPages.forEach((pageText, pageIndex) => {
           const slide = pptx.addSlide();
-          slide.addText(
-            `User Speech (${chunkIndex + 1}/${speechChunks.length})`,
-            {
-              x: 0.5,
-              y: 0.3,
-              w: 12.2,
-              h: 0.5,
-              fontSize: 22,
-              bold: true,
-              color: '0F172A',
-            }
-          );
+          slideNumber += 1;
+          slide.background = { color: 'FFFFFF' };
 
-          const bulletText = chunk
-            .map((text, index) => `${index + 1}. ${text}`)
-            .join('\n\n');
-
-          slide.addText(bulletText, {
-            x: 0.7,
-            y: 1.0,
+          slide.addText('Captured User Speech', {
+            x: 0.65,
+            y: 0.46,
+            w: 8.6,
+            h: 0.52,
+            fontFace: 'Aptos Display',
+            fontSize: 30,
+            bold: true,
+            color: palette.ink,
+            fit: 'shrink',
+          });
+          slide.addText(`Overview ${pageIndex + 1} of ${speechOverviewPages.length}`, {
+            x: 0.67,
+            y: 0.97,
+            w: 4.6,
+            h: 0.25,
+            fontFace: 'Aptos',
+            fontSize: 12,
+            color: palette.muted,
+            fit: 'shrink',
+          });
+          slide.addText(`${deckName}  •  Slide ${slideNumber}`, {
+            x: 9.15,
+            y: 0.62,
+            w: 3.5,
+            h: 0.3,
+            fontFace: 'Aptos',
+            fontSize: 11,
+            color: '94A3B8',
+            align: 'right',
+            fit: 'shrink',
+          });
+          slide.addShape(pptx.ShapeType.line, {
+            x: 0.65,
+            y: 1.22,
             w: 12.0,
-            h: 5.9,
-            fontSize: 14,
-            color: '1F2937',
+            h: 0,
+            line: { color: palette.border, pt: 1 },
+          });
+
+          slide.addShape(pptx.ShapeType.rect, {
+            x: 0.65,
+            y: 1.52,
+            w: 12.0,
+            h: 5.32,
+            fill: { color: 'F8FAFC' },
+            line: { color: palette.border, pt: 1 },
+          });
+          slide.addText('Session Speech Overview', {
+            x: 0.96,
+            y: 1.8,
+            w: 5.2,
+            h: 0.3,
+            fontFace: 'Aptos',
+            fontSize: 13,
+            bold: true,
+            color: palette.muted,
+          });
+          slide.addText(pageText, {
+            x: 0.96,
+            y: 2.18,
+            w: 11.2,
+            h: 4.5,
+            fontFace: 'Aptos',
+            fontSize: 19,
+            color: palette.ink,
             valign: 'top',
+            fit: 'shrink',
             breakLine: true,
           });
         });
@@ -706,37 +892,99 @@ function App() {
       for (let i = 0; i < visualizationItems.length; i += 1) {
         const item = visualizationItems[i];
         const slide = pptx.addSlide();
+        addSlideChrome(
+          slide,
+          `${item.type === 'chart' ? 'Chart' : 'SVG'} Visualization`,
+          `Item ${i + 1} of ${visualizationItems.length}`
+        );
+
         const timestamp = new Date(item.timestamp).toLocaleString();
-        const textSnippet = (item.newTextDelta || item.originalText || '').slice(0, 550);
+        const textSnippet = (item.newTextDelta || item.originalText || '')
+          .replace(/\s+/g, ' ')
+          .trim()
+          .slice(0, 420);
 
-        slide.addText(
-          `${item.type === 'chart' ? 'Chart' : 'SVG'} ${i + 1}/${visualizationItems.length}`,
-          {
-            x: 0.5,
-            y: 0.25,
-            w: 12.3,
-            h: 0.45,
-            fontSize: 20,
-            bold: true,
-            color: '0F172A',
-          }
-        );
+        // left metadata panel
+        slide.addShape(pptx.ShapeType.roundRect, {
+          x: 0.62,
+          y: 1.18,
+          w: 4.25,
+          h: 5.58,
+          fill: { color: palette.surface },
+          line: { color: palette.border, pt: 1 },
+        });
+        slide.addText('Metadata', {
+          x: 0.9,
+          y: 1.42,
+          w: 3.4,
+          h: 0.3,
+          fontFace: 'Aptos',
+          fontSize: 14,
+          bold: true,
+          color: palette.accent,
+        });
+        slide.addText(`Type: ${item.type.toUpperCase()}`, {
+          x: 0.9,
+          y: 1.78,
+          w: 3.65,
+          h: 0.34,
+          fontFace: 'Aptos',
+          fontSize: 13,
+          color: palette.muted,
+          fit: 'shrink',
+        });
+        slide.addText(`Mode: ${(item.generationMode || 'unknown').replace(/_/g, ' ')}`, {
+          x: 0.9,
+          y: 2.14,
+          w: 3.65,
+          h: 0.34,
+          fontFace: 'Aptos',
+          fontSize: 13,
+          color: palette.muted,
+          fit: 'shrink',
+        });
+        slide.addText(`Time: ${timestamp}`, {
+          x: 0.9,
+          y: 2.50,
+          w: 3.65,
+          h: 0.52,
+          fontFace: 'Aptos',
+          fontSize: 13,
+          color: palette.muted,
+          fit: 'shrink',
+        });
+        slide.addText('Prompt Excerpt', {
+          x: 0.9,
+          y: 3.08,
+          w: 3.4,
+          h: 0.34,
+          fontFace: 'Aptos',
+          fontSize: 14,
+          bold: true,
+          color: palette.accent,
+        });
+        slide.addText(textSnippet || 'No source text available.', {
+          x: 0.9,
+          y: 3.5,
+          w: 3.65,
+          h: 2.96,
+          fontFace: 'Aptos',
+          fontSize: 18,
+          color: palette.ink,
+          valign: 'top',
+          breakLine: true,
+          fit: 'shrink',
+        });
 
-        slide.addText(
-          `Mode: ${item.generationMode || 'unknown'}\n` +
-            `Timestamp: ${timestamp}\n\n` +
-            `Text:\n${textSnippet}`,
-          {
-            x: 0.5,
-            y: 0.9,
-            w: 4.6,
-            h: 5.9,
-            fontSize: 12,
-            color: '334155',
-            valign: 'top',
-            breakLine: true,
-          }
-        );
+        // right visualization panel
+        slide.addShape(pptx.ShapeType.roundRect, {
+          x: 5.12,
+          y: 1.18,
+          w: 7.55,
+          h: 5.58,
+          fill: { color: palette.surface },
+          line: { color: palette.border, pt: 1 },
+        });
 
         let imageData = '';
         if (item.type === 'chart' && item.chartImage) {
@@ -752,45 +1000,65 @@ function App() {
         if (imageData) {
           slide.addImage({
             data: imageData,
-            x: 5.2,
-            y: 0.9,
-            w: 7.7,
-            h: 5.9,
+            x: 5.3,
+            y: 1.34,
+            w: 7.18,
+            h: 5.22,
           });
         } else {
+          slide.addShape(pptx.ShapeType.roundRect, {
+            x: 5.72,
+            y: 3.0,
+            w: 6.65,
+            h: 1.8,
+            fill: { color: palette.accentSoft },
+            line: { color: palette.border, pt: 1 },
+          });
           slide.addText('Visualization preview unavailable for this item.', {
-            x: 5.2,
-            y: 2.8,
-            w: 7.5,
-            h: 0.8,
-            fontSize: 15,
-            color: '6B7280',
-            italic: true,
+            x: 5.9,
+            y: 3.58,
+            w: 6.2,
+            h: 0.56,
+            fontFace: 'Aptos',
+            fontSize: 20,
+            color: palette.muted,
             align: 'center',
+            fit: 'shrink',
           });
         }
       }
 
       // summary slide
       const summarySlide = pptx.addSlide();
-      summarySlide.background = { color: 'F8FAFC' };
-      summarySlide.addText('LLM Summary', {
-        x: 0.6,
-        y: 0.5,
-        w: 12.2,
-        h: 0.6,
-        fontSize: 28,
+      addSlideChrome(summarySlide, 'LLM Session Summary', 'Generated from captured speech');
+      summarySlide.addShape(pptx.ShapeType.roundRect, {
+        x: 0.62,
+        y: 1.25,
+        w: 12.05,
+        h: 5.95,
+        fill: { color: palette.surface },
+        line: { color: palette.border, pt: 1 },
+      });
+      summarySlide.addText('Executive Readout', {
+        x: 0.92,
+        y: 1.52,
+        w: 11.3,
+        h: 0.38,
+        fontFace: 'Aptos',
+        fontSize: 14,
         bold: true,
-        color: '0F172A',
+        color: palette.accent,
       });
       summarySlide.addText(llmSummary, {
-        x: 0.7,
-        y: 1.4,
-        w: 12.0,
-        h: 5.3,
-        fontSize: 16,
-        color: '1F2937',
+        x: 0.92,
+        y: 1.95,
+        w: 11.3,
+        h: 5.0,
+        fontFace: 'Aptos',
+        fontSize: 25,
+        color: palette.ink,
         valign: 'top',
+        fit: 'shrink',
         breakLine: true,
       });
 
