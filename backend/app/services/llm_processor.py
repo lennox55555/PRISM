@@ -294,6 +294,63 @@ class LLMProcessor:
                 original_text=request.text,
             )
 
+    async def generate_brief_summary(self, texts: list[str]) -> str:
+        """
+        generate a short summary from a list of user speech/text segments.
+        uses a smaller model for lightweight, low-cost summarization.
+        """
+        cleaned = [text.strip() for text in texts if text and text.strip()]
+        if not cleaned:
+            return "No user speech content was provided."
+
+        fallback_summary = (
+            f"Captured {len(cleaned)} speech segments. "
+            f"Latest content: {cleaned[-1][:180]}"
+        )
+
+        if not self.client:
+            return fallback_summary
+
+        try:
+            # keep input bounded for fast summarization
+            snippets = cleaned[:40]
+            formatted_text = "\n".join(
+                f"{idx + 1}. {snippet[:500]}" for idx, snippet in enumerate(snippets)
+            )
+
+            response = await self.client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "You summarize user speech notes. "
+                            "Return a simple, concise summary in plain text. "
+                            "Keep it short (3-6 sentences). "
+                            "Do not include markdown or code blocks."
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": (
+                            "Summarize these speech notes:\n\n"
+                            f"{formatted_text}"
+                        ),
+                    },
+                ],
+                temperature=0.2,
+                max_tokens=220,
+            )
+
+            summary = (response.choices[0].message.content or "").strip()
+            if not summary:
+                return fallback_summary
+
+            return summary
+        except Exception as e:
+            logger.error(f"summary generation error: {e}")
+            return fallback_summary
+
     async def generate_enhanced_svg(
         self,
         previous_text: str,
