@@ -4,7 +4,7 @@
  * this is a minimal implementation for your team to build upon.
  */
 
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useRef, useEffect } from 'react';
 import { AudioRecorder } from './components/AudioRecorder';
 import { TranscriptionDisplay } from './components/TranscriptionDisplay';
 import { SVGRenderer } from './components/SVGRenderer';
@@ -13,6 +13,14 @@ import {
   SVGGenerationResponse,
   RecordingState,
 } from './types';
+
+// interface for storing svg history
+interface SVGHistoryItem {
+  id: number;
+  svg: string;
+  description: string;
+  timestamp: Date;
+}
 
 // basic app styles - your team will replace these
 const styles = {
@@ -56,6 +64,35 @@ const styles = {
     borderRadius: '0.5rem',
     fontSize: '0.875rem',
   },
+  svgList: {
+    width: '100%',
+    display: 'flex',
+    flexDirection: 'column' as const,
+    gap: '1rem',
+  },
+  svgItem: {
+    width: '100%',
+    borderRadius: '0.5rem',
+    overflow: 'hidden',
+    boxShadow: '0 1px 3px rgba(0,0,0,0.1)',
+  },
+  svgTimestamp: {
+    fontSize: '0.75rem',
+    color: '#9ca3af',
+    padding: '0.5rem',
+    backgroundColor: '#f9fafb',
+    borderBottom: '1px solid #e5e7eb',
+  },
+  clearButton: {
+    padding: '0.5rem 1rem',
+    fontSize: '0.875rem',
+    backgroundColor: '#6b7280',
+    color: 'white',
+    border: 'none',
+    borderRadius: '0.25rem',
+    cursor: 'pointer',
+    marginTop: '1rem',
+  },
 };
 
 function App() {
@@ -63,8 +100,8 @@ function App() {
   const [transcriptionText, setTranscriptionText] = useState('');
   const [isPartialTranscription, setIsPartialTranscription] = useState(false);
 
-  // state for svg visualization
-  const [svgCode, setSvgCode] = useState('');
+  // state for svg visualizations - now an array
+  const [svgHistory, setSvgHistory] = useState<SVGHistoryItem[]>([]);
   const [isGeneratingSVG, setIsGeneratingSVG] = useState(false);
 
   // state for errors
@@ -72,6 +109,19 @@ function App() {
 
   // state for recording
   const [recordingState, setRecordingState] = useState<RecordingState>('idle');
+
+  // counter for unique ids
+  const idCounterRef = useRef(0);
+
+  // ref for auto-scrolling to latest svg
+  const svgListEndRef = useRef<HTMLDivElement>(null);
+
+  // auto-scroll to latest svg when new one is added
+  useEffect(() => {
+    if (svgListEndRef.current) {
+      svgListEndRef.current.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [svgHistory]);
 
   // handle transcription updates from the audio recorder
   const handleTranscription = useCallback((result: TranscriptionResult) => {
@@ -84,9 +134,17 @@ function App() {
     setError(null);
   }, []);
 
-  // handle svg generation results
+  // handle svg generation results - append to history
   const handleSVGGenerated = useCallback((response: SVGGenerationResponse) => {
-    setSvgCode(response.svg);
+    if (response.svg && !response.error) {
+      const newItem: SVGHistoryItem = {
+        id: idCounterRef.current++,
+        svg: response.svg,
+        description: response.description,
+        timestamp: new Date(),
+      };
+      setSvgHistory((prev) => [...prev, newItem]);
+    }
     setIsGeneratingSVG(false);
     if (response.error) {
       setError(response.error);
@@ -106,8 +164,9 @@ function App() {
     // clear previous content when starting a new recording
     if (state === 'recording') {
       setTranscriptionText('');
-      setSvgCode('');
+      setSvgHistory([]);
       setError(null);
+      idCounterRef.current = 0;
     }
 
     // show generating state when processing ends
@@ -115,6 +174,16 @@ function App() {
       setIsGeneratingSVG(true);
     }
   }, []);
+
+  // clear svg history
+  const handleClearHistory = useCallback(() => {
+    setSvgHistory([]);
+  }, []);
+
+  // format timestamp for display
+  const formatTime = (date: Date) => {
+    return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  };
 
   return (
     <div style={styles.app}>
@@ -146,12 +215,46 @@ function App() {
             isPartial={isPartialTranscription}
           />
 
-          {/* svg visualization display */}
-          <SVGRenderer
-            svgCode={svgCode}
-            isLoading={isGeneratingSVG}
-            error={error || undefined}
-          />
+          {/* loading indicator for svg generation */}
+          {isGeneratingSVG && (
+            <SVGRenderer
+              svgCode=""
+              isLoading={true}
+            />
+          )}
+
+          {/* svg visualization history */}
+          {svgHistory.length > 0 && (
+            <div style={styles.svgList}>
+              {svgHistory.map((item) => (
+                <div key={item.id} style={styles.svgItem}>
+                  <div style={styles.svgTimestamp}>
+                    {formatTime(item.timestamp)} - {item.description}
+                  </div>
+                  <SVGRenderer
+                    svgCode={item.svg}
+                    isLoading={false}
+                  />
+                </div>
+              ))}
+              <div ref={svgListEndRef} />
+            </div>
+          )}
+
+          {/* placeholder when no svgs yet */}
+          {svgHistory.length === 0 && !isGeneratingSVG && (
+            <SVGRenderer
+              svgCode=""
+              isLoading={false}
+            />
+          )}
+
+          {/* clear history button */}
+          {svgHistory.length > 0 && recordingState === 'idle' && (
+            <button style={styles.clearButton} onClick={handleClearHistory}>
+              clear history
+            </button>
+          )}
         </main>
       </div>
     </div>
