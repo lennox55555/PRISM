@@ -75,12 +75,16 @@
 }
 
 html {
+  height: 100%;
+  overflow: hidden;
   font-size: 16px;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
 
 body {
+  height: 100%;
+  overflow: hidden;
   font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
   background: var(--gradient-bg);
   color: var(--color-text);
@@ -164,7 +168,9 @@ body {
 }
 
 #root {
+  height: 100%;
   min-height: 100vh;
+  overflow: hidden;
 }
 
 .board-layout {
@@ -192,8 +198,10 @@ body {
   --controls-row-text: #ececec;
   --status-dot-idle: #7a7a7a;
   --status-dot-active: #82e561;
+  height: 100%;
   min-height: 100vh;
   display: flex;
+  overflow: hidden;
   background: var(--layout-bg);
   color: var(--layout-text);
   font-family: 'Avenir Next', 'Segoe UI', Tahoma, Geneva, sans-serif;
@@ -498,7 +506,7 @@ body {
 
 .board-main {
   --board-content-width: 1260px;
-  --board-slide-height: 700px;
+  --board-slide-height: 670px;
   flex: 1;
   min-width: 0;
   display: flex;
@@ -756,7 +764,7 @@ body {
 @media (max-width: 1200px) {
   .board-main {
     --board-content-width: 100%;
-    --board-slide-height: 650px;
+    --board-slide-height: 620px;
     padding: 18px;
   }
 
@@ -803,7 +811,7 @@ body {
   }
 
   .board-main {
-    --board-slide-height: 560px;
+    --board-slide-height: 540px;
     padding: 12px;
     overflow: auto;
   }
