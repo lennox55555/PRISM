@@ -128,6 +128,7 @@ export function useWebSocket(
               generationMode: data.generation_mode,
               similarityScore: data.similarity_score,
               similarityThreshold: data.similarity_threshold,
+              sessionId: data.session_id,
             };
             callbacksRef.current.onSVGGenerated?.(response);
           }
@@ -144,6 +145,7 @@ export function useWebSocket(
               error: data.error,
               generationMode: data.generation_mode || 'chart',
               chartConfidence: data.chart_confidence,
+              sessionId: data.session_id,
             };
             callbacksRef.current.onChartGenerated?.(response);
           }
@@ -151,7 +153,10 @@ export function useWebSocket(
 
         case MessageType.STATUS:
           if (data?.status) {
-            callbacksRef.current.onStatusChange?.(data.status);
+            callbacksRef.current.onStatusChange?.(data.status, {
+              visualization_active: data.visualization_active,
+              new_session: data.new_session,
+            });
           }
           break;
 

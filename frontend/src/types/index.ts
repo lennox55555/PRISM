@@ -45,6 +45,7 @@ export interface SVGGenerationResponse {
   generationMode?: 'initial' | 'enhanced' | 'new_topic' | 'chart';
   similarityScore?: number | null;
   similarityThreshold?: number;
+  sessionId?: string;  // unique ID for grouping visualizations from same prism session
 }
 
 // chart generation response from the backend (matplotlib)
@@ -57,6 +58,7 @@ export interface ChartGenerationResponse {
   error?: string;
   generationMode: 'chart' | 'enhanced';
   chartConfidence?: number;
+  sessionId?: string;  // unique ID for grouping visualizations from same prism session
 }
 
 // recording state for the audio recorder component
@@ -71,7 +73,7 @@ export interface WebSocketCallbacks {
   onSVGGenerated?: (response: SVGGenerationResponse) => void;
   onChartGenerated?: (response: ChartGenerationResponse) => void;
   onError?: (error: string) => void;
-  onStatusChange?: (status: string) => void;
+  onStatusChange?: (status: string, data?: { visualization_active?: boolean; new_session?: boolean }) => void;
   onConnectionChange?: (state: ConnectionState) => void;
 }
 

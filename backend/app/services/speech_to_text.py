@@ -171,6 +171,7 @@ class OpenAIWhisperService(BaseSpeechToText):
                 model=self.model,
                 file=audio_io,
                 response_format="json",
+                language="en",  # Force English transcription
             )
 
             return TranscriptionResult(

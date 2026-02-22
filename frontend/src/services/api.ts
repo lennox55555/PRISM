@@ -131,6 +131,11 @@ export async function transcribeAndGenerate(
 export interface SpeechSummaryResponse {
   summary: string;
   item_count: number;
+  provider?: string;
+  model?: string;
+  fallback_used?: boolean;
+  input_characters?: number;
+  elapsed_ms?: number;
 }
 
 /**
