@@ -19,8 +19,8 @@ class Settings(BaseSettings):
 
     # OpenAI / LLM Settings
     openai_api_key: str = ""
-    claude_key: str = ""  # optional anthropic claude api key
-    llm_model: str = "gpt-4"
+    claude_key: str = ""  # anthropic claude api key for svg generation
+    llm_model: str = "claude-opus-4-6"  # claude model for svg generation
 
     # Speech-to-Text Settings
     # Options: "openai_whisper", "google", "deepgram"

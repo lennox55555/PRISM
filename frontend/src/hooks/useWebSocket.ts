@@ -142,7 +142,7 @@ export function useWebSocket(
               originalText: data.original_text || '',
               newTextDelta: data.new_text_delta || '',
               error: data.error,
-              generationMode: 'chart',
+              generationMode: data.generation_mode || 'chart',
               chartConfidence: data.chart_confidence,
             };
             callbacksRef.current.onChartGenerated?.(response);
