@@ -2578,9 +2578,14 @@ function App() {
             <div className="control-status-row">
               <span className={`status-dot ${visualizationActive ? 'is-active' : ''}`} />
               <span className={`control-visualization-text ${visualizationActive ? 'is-alert' : ''}`}>
-                {visualizationActive
-                  ? `say "${deactivatePhrase}" to end visualization instructions`
-                  : `say "${triggerWord}" to visualize`}
+              {`say "${triggerWord}" to start visualization instructions`}
+              </span>
+            </div>
+
+            <div className="control-status-row">
+              <span className={`status-dot ${visualizationActive ? 'is-active' : ''}`} />
+              <span className={`control-visualization-text ${visualizationActive ? 'is-alert' : ''}`}>
+              {`say "${deactivatePhrase}" to stop `}
               </span>
             </div>
 
