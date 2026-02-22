@@ -305,26 +305,34 @@ class AudioSessionHandler:
             result = await self.stt_service.transcribe_file(audio_data)
 
             if result.text and result.text.strip():
-                # filter out common whisper hallucinations on silence
                 text = result.text.strip()
-                hallucinations = [
-                    "you", "thank you", "thanks for watching",
-                    "subscribe", "bye", "goodbye", "the end",
-                    "thanks for listening", "see you", "okay",
-                    "thank you for watching", "thanks for watching",
-                ]
+                lower_text_check = text.lower().strip(".,!? ")
 
-                # check if the transcription is just a hallucination
-                lower_text = text.lower().strip(".,!? ")
-                if lower_text in hallucinations:
-                    logger.info(f"filtered out likely hallucination: {text}")
-                    return
+                # IMPORTANT: Check for deactivation phrase BEFORE filtering hallucinations
+                # "thank you" is a common hallucination but also our deactivation phrase
+                if self.visualization_active and lower_text_check in ["thank you", "thankyou", "thanks"]:
+                    # This is the deactivation phrase, process it normally
+                    logger.info(f"detected deactivation phrase: {text}")
+                else:
+                    # filter out common whisper hallucinations on silence
+                    # NOTE: "thank you" removed from this list - handled above
+                    hallucinations = [
+                        "you", "thanks for watching",
+                        "subscribe", "bye", "goodbye", "the end",
+                        "thanks for listening", "see you", "okay",
+                        "thank you for watching", "thanks for watching",
+                    ]
 
-                # check for repeated single words (another hallucination pattern)
-                words = text.lower().split()
-                if len(words) > 2 and len(set(words)) == 1:
-                    logger.info(f"filtered out repeated word hallucination: {text}")
-                    return
+                    # check if the transcription is just a hallucination
+                    if lower_text_check in hallucinations:
+                        logger.info(f"filtered out likely hallucination: {text}")
+                        return
+
+                    # check for repeated single words (another hallucination pattern)
+                    words = text.lower().split()
+                    if len(words) > 2 and len(set(words)) == 1:
+                        logger.info(f"filtered out repeated word hallucination: {text}")
+                        return
 
                 # check for trigger word to toggle visualization
                 text_to_add = await self._process_trigger_word(text)
@@ -401,6 +409,8 @@ class AudioSessionHandler:
         if self.visualization_active and found_deactivate:
             self.visualization_active = False
             self.just_activated = False
+            # Clear visualization text to prevent any pending generations
+            self.visualization_text = ""
             logger.info(f"visualization STOPPED (deactivation phrase: {found_deactivate}, after {time_since_activation:.1f}s)")
 
             # send status update to client
@@ -414,10 +424,7 @@ class AudioSessionHandler:
                 ),
             )
 
-            # return text before the deactivation phrase
-            parts = lower_text.split(found_deactivate)
-            if len(parts) > 0:
-                return parts[0].strip()
+            # don't return any text - we don't want to add anything after deactivation
             return ""
 
         # check for activation words (when visualization is not active)
