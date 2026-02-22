@@ -101,12 +101,47 @@ function getSlideItemLabel(item: SlideRenderItem): string {
 }
 
 function getSessionShortLabel(name: string): string {
-  const match = name.match(/(\d+)$/);
-  if (match) {
-    return `S${match[1]}`;
-  }
-  return name.charAt(0).toUpperCase();
+  const trimmed = name.trim();
+  return (trimmed.charAt(0) || 'S').toUpperCase();
 }
+
+function getLowestUnusedPositiveNumber(values: number[]): number {
+  const used = new Set(values.filter((v) => Number.isInteger(v) && v > 0));
+  let candidate = 1;
+  while (used.has(candidate)) {
+    candidate += 1;
+  }
+  return candidate;
+}
+
+function getNextSessionName(sessions: Session[]): string {
+  const usedNumbers = sessions
+    .map((s) => {
+      const match = s.name.match(/^Session\s+(\d+)$/i);
+      return match ? Number(match[1]) : null;
+    })
+    .filter((v): v is number => v !== null);
+  return `Session ${getLowestUnusedPositiveNumber(usedNumbers)}`;
+}
+
+function getNextSessionId(sessions: Session[]): number {
+  return getLowestUnusedPositiveNumber(sessions.map((s) => s.id));
+}
+
+// PRISM Logo component
+const PrismLogo = () => (
+  <svg className="board-logo" viewBox="0 0 120 72" aria-hidden="true">
+    <path
+      d="M52 12L14 60h76L52 12z"
+      fill="none"
+      stroke="#f0f0f0"
+      strokeWidth="8"
+      strokeLinejoin="round"
+    />
+    <path d="M4 42L92 58 84 72 0 48z" fill="#3ad54f" />
+    <path d="M30 36L102 52 84 72 20 50z" fill="#8ced63" />
+  </svg>
+);
 
 function escapeHtml(value: string): string {
   return value
@@ -239,8 +274,6 @@ function App() {
     const { sessions } = loadInitialSessions();
     return sessions.length > 0 ? sessions[0].id : 1;
   });
-  const sessionCounterRef = useRef(loadInitialSessions().maxId);
-
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
 
   // Initialize transcription and notes from the active session in localStorage
@@ -396,16 +429,18 @@ function App() {
   }, [recordingState, visualizationActive]);
 
   const handleNewSession = useCallback(() => {
+    const nextId = getNextSessionId(sessions);
+    const nextName = getNextSessionName(sessions);
+
     setSessions((prev) => prev.map((session) => (
       session.id === activeSessionId
         ? { ...session, notes: notesHistory, transcriptionText }
         : session
     )));
 
-    sessionCounterRef.current += 1;
     const newSession: Session = {
-      id: sessionCounterRef.current,
-      name: `Session ${sessionCounterRef.current}`,
+      id: nextId,
+      name: nextName,
       notes: [],
       transcriptionText: '',
     };
@@ -421,7 +456,7 @@ function App() {
     setActiveSlideIndex(0);
     idCounterRef.current = 0;
     lastCapturedTextLengthRef.current = 0;
-  }, [activeSessionId, notesHistory, transcriptionText]);
+  }, [activeSessionId, notesHistory, sessions, transcriptionText]);
 
   const handleDeleteSession = useCallback((sessionId: number, event: React.MouseEvent) => {
     event.stopPropagation();
@@ -436,7 +471,6 @@ function App() {
           notes: [],
           transcriptionText: '',
         };
-        sessionCounterRef.current = 1;
         setActiveSessionId(1);
         setNotesHistory([]);
         setTranscriptionText('');
@@ -454,6 +488,18 @@ function App() {
       return filtered;
     });
   }, [activeSessionId]);
+
+  const handleRenameSession = useCallback((sessionId: number) => {
+    const target = sessions.find((s) => s.id === sessionId);
+    if (!target) return;
+
+    const newName = window.prompt('Rename session', target.name);
+    if (newName && newName.trim()) {
+      setSessions((prev) =>
+        prev.map((s) => (s.id === sessionId ? { ...s, name: newName.trim() } : s))
+      );
+    }
+  }, [sessions]);
 
   const handleSwitchSession = useCallback((sessionId: number) => {
     setSessions((prev) => prev.map((session) => (
@@ -1620,7 +1666,14 @@ function App() {
               className={`board-session-item ${session.id === activeSessionId ? 'is-active' : ''}`}
               onClick={() => handleSwitchSession(session.id)}
             >
-              <span className="session-label">
+              <span
+                className="session-label"
+                onDoubleClick={(e) => {
+                  e.stopPropagation();
+                  handleRenameSession(session.id);
+                }}
+                title="Double-click to rename"
+              >
                 {isSidebarCollapsed ? getSessionShortLabel(session.name) : session.name}
               </span>
               <button
@@ -1706,7 +1759,10 @@ function App() {
                   </button>
                 )}
               </div>
-              <p className="board-brand">PRISM</p>
+              <div className="board-brand-row">
+                <PrismLogo />
+                <p className="board-brand">PRISM</p>
+              </div>
               <button type="button" className="board-footer-link">Settings</button>
               <button type="button" className="board-footer-link">Updates & FAQ</button>
             </>
