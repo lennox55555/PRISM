@@ -198,6 +198,7 @@ export function AudioRecorder({
   onRecordingStateChange,
   onRealtimeTranscript,
   onConnectionStateChange,
+  onStatusChange,
   compact = false,
 }: AudioRecorderProps) {
   const {
@@ -217,6 +218,9 @@ export function AudioRecorder({
     },
     onError: (error: string) => {
       onError?.(error);
+    },
+    onStatusChange: (status: string, data?: { visualization_active?: boolean; new_session?: boolean }) => {
+      onStatusChange?.(status, data);
     },
   });
 

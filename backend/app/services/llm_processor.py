@@ -236,6 +236,25 @@ class LLMProcessor:
   </text>
 </svg>"""
 
+    # =========================================================================
+    # TEXT EMBEDDING & SEMANTIC SIMILARITY
+    # =========================================================================
+    # These methods use OpenAI's text-embedding-3-small model to convert text
+    # into high-dimensional vectors (embeddings) that capture semantic meaning.
+    #
+    # HOW EMBEDDINGS WORK:
+    # - Text is converted to a vector of ~1536 floating point numbers
+    # - Similar meanings = similar vectors (close in vector space)
+    # - Cosine similarity measures angle between vectors (1.0 = identical, 0.0 = unrelated)
+    #
+    # USE CASE IN PRISM:
+    # - Compare current speech to previous visualization's text
+    # - If semantically similar (score >= 0.75) → enhance existing visualization
+    # - If different topic (score < 0.75) → create new visualization
+    #
+    # NOTE: Currently not actively used - see websocket.py for commented usage
+    # =========================================================================
+
     def _cosine_similarity(self, vec1: list[float], vec2: list[float]) -> float:
         """Calculate cosine similarity between two vectors."""
         import math
