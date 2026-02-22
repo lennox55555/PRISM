@@ -1571,10 +1571,11 @@ function App() {
   }, [notesHistory, realtimeTranscript, recordingState]);
 
   const slidePages = useMemo<SlidePage[]>(() => {
-    // Create one slide per item - each visualization gets its own page
+    // Each VISUALIZATION gets its own page, text notes are grouped with their visualization
     const pages: SlidePage[] = [];
+    let currentTextItems: SlideRenderItem[] = [];
 
-    slideSources.forEach((source, index) => {
+    slideSources.forEach((source) => {
       const hasVisual = source.type === 'chart'
         || (source.type === 'svg' && isRenderableSvg(source.svg));
       let text = source.newTextDelta.trim();
@@ -1596,12 +1597,26 @@ function App() {
         isContinuation: false,
       };
 
-      // Each item gets its own page/slide
-      pages.push({
-        id: index + 1,
-        items: [item],
-      });
+      if (hasVisual) {
+        // Visualization gets its own page, include any preceding text notes
+        pages.push({
+          id: pages.length + 1,
+          items: [...currentTextItems, item],
+        });
+        currentTextItems = [];
+      } else {
+        // Text/live notes accumulate until next visualization
+        currentTextItems.push(item);
+      }
     });
+
+    // Add remaining text items as a page if any
+    if (currentTextItems.length > 0) {
+      pages.push({
+        id: pages.length + 1,
+        items: currentTextItems,
+      });
+    }
 
     // Always have at least one empty page
     if (pages.length === 0) {
