@@ -284,7 +284,7 @@ function App() {
   const [activeSlideIndex, setActiveSlideIndex] = useState(0);
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
   const [lastSavedTime, setLastSavedTime] = useState<Date | null>(null);
-  const [isDarkModeLabel, setIsDarkModeLabel] = useState(false);
+  const [expandedSessionActions, setExpandedSessionActions] = useState<number | null>(null);
 
   const idCounterRef = useRef(0);
   const lastCapturedTextLengthRef = useRef(0);
@@ -1734,7 +1734,21 @@ function App() {
           onClick={() => setIsSidebarCollapsed((prev) => !prev)}
           aria-label={isSidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
         >
-          {isSidebarCollapsed ? '>' : '<'}
+          <svg
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2.5"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            className="sidebar-toggle-icon"
+          >
+            {isSidebarCollapsed ? (
+              <polyline points="9 18 15 12 9 6" />
+            ) : (
+              <polyline points="15 18 9 12 15 6" />
+            )}
+          </svg>
         </button>
 
         <button type="button" className="board-new-session" onClick={handleNewSession}>
@@ -1795,11 +1809,14 @@ function App() {
           {sessions.map((session) => (
             <div
               key={session.id}
-              className={`board-session-item ${session.id === activeSessionId ? 'is-active' : ''}`}
-              onClick={() => handleSwitchSession(session.id)}
+              className={`board-session-item ${session.id === activeSessionId ? 'is-active' : ''} ${expandedSessionActions === session.id ? 'actions-expanded' : ''}`}
+              onClick={() => {
+                if (expandedSessionActions === session.id) return;
+                handleSwitchSession(session.id);
+              }}
             >
               <span
-                className="session-label"
+                className={`session-label ${expandedSessionActions === session.id ? 'hidden' : ''}`}
                 onDoubleClick={(e) => {
                   e.stopPropagation();
                   handleRenameSession(session.id);
@@ -1808,84 +1825,120 @@ function App() {
               >
                 {isSidebarCollapsed ? getSessionShortLabel(session.name) : session.name}
               </span>
+
               {!isSidebarCollapsed && (
-                <details
-                  className="session-actions-dropdown"
-                  onClick={(event) => event.stopPropagation()}
-                >
-                  <summary
-                    className="session-actions-trigger"
-                    aria-label={`Open actions for ${session.name}`}
-                    title={`Open actions for ${session.name}`}
-                  >
-                    <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-                      <circle cx="5" cy="12" r="2" />
-                      <circle cx="12" cy="12" r="2" />
-                      <circle cx="19" cy="12" r="2" />
-                    </svg>
-                  </summary>
-                  <div className="session-actions-menu">
+                <div className={`session-actions-slideout ${expandedSessionActions === session.id ? 'is-open' : ''}`}>
+                  {expandedSessionActions === session.id ? (
+                    <>
+                      <button
+                        type="button"
+                        className="session-action-btn"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setExpandedSessionActions(null);
+                        }}
+                        title="Close"
+                        aria-label="Close actions"
+                      >
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+                          <path d="M15 18l-6-6 6-6" />
+                        </svg>
+                      </button>
+                      <button
+                        type="button"
+                        className="session-action-btn"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleRenameSession(session.id);
+                          setExpandedSessionActions(null);
+                        }}
+                        title="Rename"
+                        aria-label="Rename session"
+                      >
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                          <path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7" />
+                          <path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z" />
+                        </svg>
+                      </button>
+                      <button
+                        type="button"
+                        className="session-action-btn"
+                        disabled={
+                          !hasSessionExportableData(session.id)
+                          || (session.id === activeSessionId && !isExportAvailable)
+                        }
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          void exportSessionAsPdf(session.id);
+                          setExpandedSessionActions(null);
+                        }}
+                        title="Export PDF"
+                        aria-label="Export as PDF"
+                      >
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                          <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" />
+                          <polyline points="14 2 14 8 20 8" />
+                          <line x1="12" y1="18" x2="12" y2="12" />
+                          <line x1="9" y1="15" x2="15" y2="15" />
+                        </svg>
+                      </button>
+                      <button
+                        type="button"
+                        className="session-action-btn"
+                        disabled={
+                          !hasSessionExportableData(session.id)
+                          || (session.id === activeSessionId && !isExportAvailable)
+                        }
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          void exportSessionAsPptx(session.id);
+                          setExpandedSessionActions(null);
+                        }}
+                        title="Export PPTX"
+                        aria-label="Export as PowerPoint"
+                      >
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                          <rect x="2" y="3" width="20" height="14" rx="2" ry="2" />
+                          <line x1="8" y1="21" x2="16" y2="21" />
+                          <line x1="12" y1="17" x2="12" y2="21" />
+                        </svg>
+                      </button>
+                      <button
+                        type="button"
+                        className="session-action-btn session-action-btn-danger"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setExpandedSessionActions(null);
+                          handleDeleteSession(session.id, e);
+                        }}
+                        title="Delete"
+                        aria-label="Delete session"
+                      >
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                          <polyline points="3 6 5 6 21 6" />
+                          <path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2" />
+                        </svg>
+                      </button>
+                    </>
+                  ) : (
                     <button
                       type="button"
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        handleRenameSession(session.id);
-                        const details = event.currentTarget.closest('details');
-                        if (details instanceof HTMLDetailsElement) {
-                          details.open = false;
-                        }
+                      className="session-actions-trigger"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setExpandedSessionActions(session.id);
                       }}
+                      aria-label={`Open actions for ${session.name}`}
+                      title="Actions"
                     >
-                      Rename
+                      <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                        <circle cx="5" cy="12" r="2" />
+                        <circle cx="12" cy="12" r="2" />
+                        <circle cx="19" cy="12" r="2" />
+                      </svg>
                     </button>
-                    <button
-                      type="button"
-                      onClick={(event) => {
-                        const details = event.currentTarget.closest('details');
-                        if (details instanceof HTMLDetailsElement) {
-                          details.open = false;
-                        }
-                        handleDeleteSession(session.id, event);
-                      }}
-                    >
-                      Delete
-                    </button>
-                    <button
-                      type="button"
-                      disabled={
-                        !hasSessionExportableData(session.id)
-                        || (session.id === activeSessionId && !isExportAvailable)
-                      }
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        void exportSessionAsPdf(session.id);
-                        const details = event.currentTarget.closest('details');
-                        if (details instanceof HTMLDetailsElement) {
-                          details.open = false;
-                        }
-                      }}
-                    >
-                      Export PDF
-                    </button>
-                    <button
-                      type="button"
-                      disabled={
-                        !hasSessionExportableData(session.id)
-                        || (session.id === activeSessionId && !isExportAvailable)
-                      }
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        void exportSessionAsPptx(session.id);
-                        const details = event.currentTarget.closest('details');
-                        if (details instanceof HTMLDetailsElement) {
-                          details.open = false;
-                        }
-                      }}
-                    >
-                      Export PPTX
-                    </button>
-                  </div>
-                </details>
+                  )}
+                </div>
               )}
             </div>
           ))}
@@ -1918,33 +1971,6 @@ function App() {
                 <PrismLogo />
                 <p className="board-brand">PRISM</p>
               </div>
-              <button
-                type="button"
-                className="board-footer-link board-theme-toggle"
-                onClick={() => setIsDarkModeLabel((prev) => !prev)}
-              >
-                <span className="theme-toggle-icon" aria-hidden="true">
-                  {isDarkModeLabel ? (
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                      <path d="M21 12.79A9 9 0 1111.21 3a7 7 0 009.79 9.79z" />
-                    </svg>
-                  ) : (
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                      <circle cx="12" cy="12" r="4" />
-                      <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41" />
-                    </svg>
-                  )}
-                </span>
-                <span>{isDarkModeLabel ? 'Dark Mode' : 'Light Mode'}</span>
-              </button>
-              <button type="button" className="board-footer-link board-footer-link-with-icon">
-                <span className="board-footer-icon" aria-hidden="true">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                    <path d="M5 12h14M13 6l6 6-6 6" />
-                  </svg>
-                </span>
-                <span>Updates & FAQ</span>
-              </button>
             </>
           )}
           {isSidebarCollapsed && (
@@ -2070,13 +2096,6 @@ function App() {
         </section>
 
         <section className="board-controls">
-          <div className="control-start-text">
-            <p>Click To Start</p>
-            <p className="control-subtext">
-              {recordingState === 'idle' ? 'voice capture' : 'live transcription'}
-            </p>
-          </div>
-
           <div className="control-recorder-wrap">
             <AudioRecorder
               onTranscription={handleTranscription}
