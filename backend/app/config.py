@@ -21,6 +21,8 @@ class Settings(BaseSettings):
     openai_api_key: str = ""
     claude_key: str = ""  # anthropic claude api key for svg generation
     llm_model: str = "claude-opus-4-6"  # claude model for svg generation
+    summary_llm_provider: str = "claude"  # compatibility with existing .env files
+    summary_llm_model: str = "claude-sonnet-4-6"  # claude model for summaries
 
     # Speech-to-Text Settings
     # Options: "openai_whisper", "google", "deepgram"

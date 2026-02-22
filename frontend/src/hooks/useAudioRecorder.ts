@@ -132,6 +132,11 @@ interface SpeechRecognitionAlternative {
   confidence: number;
 }
 
+function normalizePrismWord(value: string): string {
+  // Preserve transcript content except common misrecognitions of "prism".
+  return value.replace(/\bpri(?:son|sion)\b/gi, 'prism');
+}
+
 export function useAudioRecorder(
   options: UseAudioRecorderOptions = {}
 ): UseAudioRecorderReturn {
@@ -158,6 +163,8 @@ export function useAudioRecorder(
   const chunkIntervalRef = useRef<ReturnType<typeof setInterval>>();
   const isRecordingRef = useRef(false);
   const speechRecognitionRef = useRef<any>(null);
+  const cumulativeFinalTranscriptRef = useRef('');
+  const sessionFinalTranscriptRef = useRef('');
 
   // update state and notify callback
   const updateState = useCallback(
@@ -241,6 +248,9 @@ export function useAudioRecorder(
       updateState('recording');
       isRecordingRef.current = true;
       audioBufferRef.current = [];
+      cumulativeFinalTranscriptRef.current = '';
+      sessionFinalTranscriptRef.current = '';
+      setRealtimeTranscript('');
 
       // request microphone access
       const stream = await navigator.mediaDevices.getUserMedia({
@@ -293,33 +303,53 @@ export function useAudioRecorder(
         console.log('Starting browser speech recognition...');
         const recognition = new SpeechRecognition();
         recognition.continuous = true;
-        recognition.interimResults = true;
+        recognition.interimResults = false;
         recognition.lang = 'en-US';
         recognition.maxAlternatives = 1;
 
-        let finalTranscript = '';
-
         recognition.onresult = (event: SpeechRecognitionEvent) => {
-          let interimTranscript = '';
+          let currentSessionFinal = '';
 
-          for (let i = event.resultIndex; i < event.results.length; i++) {
+          // Rebuild the finalized transcript for this recognition run.
+          for (let i = 0; i < event.results.length; i++) {
             const result = event.results[i];
-            // Replace "prison" with "prism"
-            const transcript = result[0].transcript.replace(/\bprison\b/gi, 'prism');
+            if (!result.isFinal) {
+              continue;
+            }
 
-            if (result.isFinal) {
-              finalTranscript += transcript + ' ';
-              onRealtimeTranscript?.(finalTranscript.trim(), true);
-            } else {
-              interimTranscript += transcript;
+            const transcript = normalizePrismWord(result[0].transcript).trim();
+            if (transcript) {
+              currentSessionFinal += `${transcript} `;
             }
           }
 
-          // Update display with final + interim
-          const fullTranscript = (finalTranscript + interimTranscript).trim();
-          setRealtimeTranscript(fullTranscript);
-          if (interimTranscript) {
-            onRealtimeTranscript?.(fullTranscript, false);
+          currentSessionFinal = currentSessionFinal.trim();
+          if (!currentSessionFinal) {
+            return;
+          }
+
+          // Append only new finalized text from this recognition run.
+          const previousSessionFinal = sessionFinalTranscriptRef.current.trim();
+          let delta = '';
+          if (!previousSessionFinal) {
+            delta = currentSessionFinal;
+          } else if (currentSessionFinal.startsWith(previousSessionFinal)) {
+            delta = currentSessionFinal.slice(previousSessionFinal.length).trim();
+          } else if (!previousSessionFinal.startsWith(currentSessionFinal)) {
+            // Recognition likely restarted and provided a fresh phrase set.
+            delta = currentSessionFinal;
+          }
+
+          sessionFinalTranscriptRef.current = currentSessionFinal;
+          if (delta) {
+            cumulativeFinalTranscriptRef.current =
+              `${cumulativeFinalTranscriptRef.current} ${delta}`.trim();
+          }
+
+          const fullTranscript = cumulativeFinalTranscriptRef.current.trim();
+          if (fullTranscript) {
+            setRealtimeTranscript(fullTranscript);
+            onRealtimeTranscript?.(fullTranscript, true);
           }
         };
 
@@ -340,6 +370,7 @@ export function useAudioRecorder(
         recognition.onend = () => {
           // Restart if still recording
           if (isRecordingRef.current) {
+            sessionFinalTranscriptRef.current = '';
             try {
               recognition.start();
             } catch (e) {
