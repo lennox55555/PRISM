@@ -681,13 +681,23 @@ function App() {
 
   const previousSlideCountRef = useRef(totalSlides);
   useEffect(() => {
+    // only clamp if current index is out of bounds
     setActiveSlideIndex((prev) => Math.min(prev, Math.max(totalSlides - 1, 0)));
   }, [totalSlides]);
 
+  // track visualization session changes - only advance slide when NEW prism session starts
+  const prevVisualizationActiveRef = useRef(visualizationActive);
   useEffect(() => {
-    if (totalSlides > previousSlideCountRef.current) {
-      setActiveSlideIndex(totalSlides - 1);
+    // detect transition: visualization was OFF, now ON (new prism session started)
+    if (visualizationActive && !prevVisualizationActiveRef.current) {
+      // new visualization session started - go to latest slide
+      setActiveSlideIndex(Math.max(totalSlides - 1, 0));
     }
+    prevVisualizationActiveRef.current = visualizationActive;
+  }, [visualizationActive, totalSlides]);
+
+  // DON'T auto-advance during a session - removed the auto-advance on totalSlides change
+  useEffect(() => {
     previousSlideCountRef.current = totalSlides;
   }, [totalSlides]);
 
