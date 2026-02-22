@@ -58,6 +58,11 @@ class SpeechSummaryResponse(BaseModel):
 
     summary: str
     item_count: int
+    provider: str
+    model: str
+    fallback_used: bool
+    input_characters: int
+    elapsed_ms: int
 
 
 @router.post("/text-to-svg", response_model=SVGGenerationResponse)
@@ -222,11 +227,26 @@ async def summarize_speech(request: SpeechSummaryRequest):
             )
 
         llm_processor = LLMProcessor()
-        summary = await llm_processor.generate_brief_summary(cleaned_texts)
+        summary_payload = await llm_processor.generate_brief_summary_with_debug(cleaned_texts)
+
+        logger.info(
+            "speech summary generated via %s (%s), items=%d, chars=%d, fallback=%s, elapsed_ms=%d",
+            summary_payload["provider"],
+            summary_payload["model"],
+            len(cleaned_texts),
+            summary_payload["input_characters"],
+            summary_payload["fallback_used"],
+            summary_payload["elapsed_ms"],
+        )
 
         return SpeechSummaryResponse(
-            summary=summary,
+            summary=summary_payload["summary"],
             item_count=len(cleaned_texts),
+            provider=summary_payload["provider"],
+            model=summary_payload["model"],
+            fallback_used=summary_payload["fallback_used"],
+            input_characters=summary_payload["input_characters"],
+            elapsed_ms=summary_payload["elapsed_ms"],
         )
     except HTTPException:
         raise

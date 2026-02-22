@@ -61,7 +61,8 @@ BOARD/
 6. when recording stops, accumulated text is sent to llm processor
 7. llm generates svg code based on the description
 8. svg is sanitized, processed, and sent back to frontend
-9. frontend renders the svg visualization
+9. optional live summary mode uses claude to convert transcript into slide-ready notes
+10. frontend renders notes on the left and visualization on the right
 
 ### backend services
 
@@ -122,7 +123,10 @@ copy `backend/.env.example` to `backend/.env` and configure:
 | variable | description | default |
 |----------|-------------|---------|
 | OPENAI_API_KEY | openai api key for whisper and gpt | required |
-| LLM_MODEL | llm model to use | gpt-4 |
+| CLAUDE_KEY | anthropic api key for claude models | required for svg + summary |
+| LLM_MODEL | llm model to use for svg generation | claude-opus-4-6 |
+| SUMMARY_LLM_PROVIDER | provider for live speech summaries | claude |
+| SUMMARY_LLM_MODEL | model used for live speech summaries | claude-sonnet-4-6 |
 | STT_PROVIDER | speech-to-text provider | openai_whisper |
 | CORS_ORIGINS | allowed cors origins | localhost:5173,localhost:3000 |
 
@@ -133,6 +137,7 @@ copy `backend/.env.example` to `backend/.env` and configure:
 - `POST /api/text-to-svg` - generate svg from text description
 - `POST /api/transcribe` - transcribe uploaded audio file
 - `POST /api/transcribe-and-generate` - combined transcription and svg generation
+- `POST /api/summarize-speech` - summarize transcript chunks into slide-ready bullet notes
 - `GET /api/placeholder-svg` - get loading placeholder svg
 - `GET /health` - health check endpoint
 

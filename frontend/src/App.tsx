@@ -1,6 +1,6 @@
 import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
 import { AudioRecorder } from './components/AudioRecorder';
-import { summarizeUserSpeech } from './services/api';
+import { summarizeUserSpeech, SpeechSummaryResponse } from './services/api';
 import PptxGenJS from 'pptxgenjs';
 import {
   TranscriptionResult,
@@ -69,6 +69,79 @@ interface SlideRenderItem extends SlideSourceItem {
 interface SlidePage {
   id: number;
   items: SlideRenderItem[];
+}
+
+type NotesMode = 'transcript' | 'summary';
+type SummaryStatus = 'idle' | 'updating' | 'ready' | 'error';
+
+interface SummaryLineGroups {
+  bulletLines: string[];
+  paragraphLines: string[];
+}
+
+interface LiveSummaryDebug {
+  provider: string;
+  model: string;
+  fallbackUsed: boolean;
+  itemCount: number;
+  inputCharacters: number;
+  elapsedMs: number;
+  updatedAt: Date;
+}
+
+function chunkTranscriptForSummary(text: string, maxChunkLength = 320): string[] {
+  const normalized = text.replace(/\s+/g, ' ').trim();
+  if (!normalized) {
+    return [];
+  }
+
+  const sentenceLikeParts = normalized
+    .split(/(?<=[.!?])\s+/)
+    .map((part) => part.trim())
+    .filter((part) => part.length > 0);
+
+  const chunks: string[] = [];
+  let currentChunk = '';
+
+  for (const part of sentenceLikeParts) {
+    const candidate = currentChunk ? `${currentChunk} ${part}` : part;
+    if (candidate.length <= maxChunkLength) {
+      currentChunk = candidate;
+      continue;
+    }
+
+    if (currentChunk) {
+      chunks.push(currentChunk);
+    }
+    currentChunk = part.slice(0, maxChunkLength);
+  }
+
+  if (currentChunk) {
+    chunks.push(currentChunk);
+  }
+
+  return chunks.slice(-40);
+}
+
+function groupSummaryLines(summary: string): SummaryLineGroups {
+  const lines = summary
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+
+  const bulletLines: string[] = [];
+  const paragraphLines: string[] = [];
+
+  lines.forEach((line) => {
+    const match = line.match(/^([*-]|\u2022|\d+[.)])\s+(.+)$/);
+    if (match && match[2]) {
+      bulletLines.push(match[2].trim());
+    } else {
+      paragraphLines.push(line);
+    }
+  });
+
+  return { bulletLines, paragraphLines };
 }
 
 
@@ -145,6 +218,11 @@ function sanitizeFilename(input: string): string {
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '')
     .slice(0, 60) || 'session';
+}
+
+function normalizePrismWord(value: string): string {
+  // Preserve transcript content except common misrecognitions of "prism".
+  return value.replace(/\bpri(?:son|sion)\b/gi, 'prism');
 }
 
 async function svgMarkupToPngDataUrl(
@@ -285,9 +363,18 @@ function App() {
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
   const [lastSavedTime, setLastSavedTime] = useState<Date | null>(null);
   const [expandedSessionActions, setExpandedSessionActions] = useState<number | null>(null);
+  const [notesMode, setNotesMode] = useState<NotesMode>('transcript');
+  const [liveSummary, setLiveSummary] = useState('');
+  const [summaryStatus, setSummaryStatus] = useState<SummaryStatus>('idle');
+  const [summaryError, setSummaryError] = useState<string | null>(null);
+  const [summaryDebug, setSummaryDebug] = useState<LiveSummaryDebug | null>(null);
 
   const idCounterRef = useRef(0);
   const lastCapturedTextLengthRef = useRef(0);
+  const summaryRequestIdRef = useRef(0);
+  const lastSummarySourceKeyRef = useRef('');
+  const lastSummarizedLengthRef = useRef(0);
+  const hasRealtimeTranscriptRef = useRef(false);
 
   const transcriptionTextRef = useRef(transcriptionText);
   const notesHistoryRef = useRef(notesHistory);
@@ -315,6 +402,112 @@ function App() {
       setHasUnsavedChanges(true);
     }
   }, [transcriptionText]);
+
+  const summaryInputSegments = useMemo(
+    () => chunkTranscriptForSummary(transcriptionText),
+    [transcriptionText]
+  );
+  const summaryInputKey = useMemo(
+    () => summaryInputSegments.join('\n'),
+    [summaryInputSegments]
+  );
+  const summaryLineGroups = useMemo(
+    () => groupSummaryLines(liveSummary),
+    [liveSummary]
+  );
+
+  const requestLiveSummary = useCallback(
+    async (segments: string[], sourceKey: string) => {
+      const requestId = summaryRequestIdRef.current + 1;
+      summaryRequestIdRef.current = requestId;
+      setSummaryStatus('updating');
+      setSummaryError(null);
+
+      try {
+        const response: SpeechSummaryResponse = await summarizeUserSpeech(segments);
+        if (requestId !== summaryRequestIdRef.current) {
+          return;
+        }
+
+        const nextSummary = response.summary?.trim() || '- Summary unavailable.';
+        setLiveSummary(nextSummary);
+        setSummaryStatus('ready');
+        setSummaryDebug({
+          provider: response.provider || 'unknown',
+          model: response.model || 'unknown',
+          fallbackUsed: Boolean(response.fallback_used),
+          itemCount: response.item_count ?? segments.length,
+          inputCharacters: response.input_characters ?? segments.join(' ').length,
+          elapsedMs: response.elapsed_ms ?? 0,
+          updatedAt: new Date(),
+        });
+        lastSummarySourceKeyRef.current = sourceKey;
+        lastSummarizedLengthRef.current = segments.join(' ').length;
+
+        console.debug('[live-summary] updated', {
+          provider: response.provider,
+          model: response.model,
+          items: response.item_count,
+          chars: response.input_characters,
+          elapsedMs: response.elapsed_ms,
+          fallback: response.fallback_used,
+        });
+      } catch (summaryRequestError) {
+        if (requestId !== summaryRequestIdRef.current) {
+          return;
+        }
+
+        const message = summaryRequestError instanceof Error
+          ? summaryRequestError.message
+          : 'Summary generation failed.';
+        setSummaryStatus('error');
+        setSummaryError(message);
+        console.error('[live-summary] request failed:', summaryRequestError);
+      }
+    },
+    []
+  );
+
+  useEffect(() => {
+    if (notesMode !== 'summary') {
+      return;
+    }
+
+    const normalizedLength = transcriptionText.trim().length;
+    if (!normalizedLength || summaryInputSegments.length === 0) {
+      setLiveSummary('');
+      setSummaryStatus('idle');
+      setSummaryError(null);
+      setSummaryDebug(null);
+      lastSummarySourceKeyRef.current = '';
+      lastSummarizedLengthRef.current = 0;
+      return;
+    }
+
+    if (summaryInputKey === lastSummarySourceKeyRef.current) {
+      return;
+    }
+
+    // reduce request volume while recording by requiring meaningful transcript growth.
+    const deltaSinceLastSummary = Math.abs(normalizedLength - lastSummarizedLengthRef.current);
+    if (recordingState === 'recording' && deltaSinceLastSummary < 40) {
+      return;
+    }
+
+    const delayMs = recordingState === 'recording' ? 1100 : 300;
+    const timeoutId = window.setTimeout(() => {
+      void requestLiveSummary(summaryInputSegments, summaryInputKey);
+    }, delayMs);
+
+    return () => window.clearTimeout(timeoutId);
+  }, [
+    notesMode,
+    recordingState,
+    requestLiveSummary,
+    summaryInputKey,
+    summaryInputSegments,
+    transcriptionText,
+  ]);
 
   // Track if we're currently saving to avoid marking as unsaved immediately after save
   const isSavingRef = useRef(false);
@@ -438,12 +631,19 @@ function App() {
     setNotesHistory([]);
     setTranscriptionText('');
     setRealtimeTranscript('');
+    hasRealtimeTranscriptRef.current = false;
     setIsGeneratingSVG(false);
     setVisualizationActive(false);
     setError(null);
     setActiveSlideIndex(0);
+    setLiveSummary('');
+    setSummaryStatus('idle');
+    setSummaryError(null);
+    setSummaryDebug(null);
     idCounterRef.current = 0;
     lastCapturedTextLengthRef.current = 0;
+    lastSummarySourceKeyRef.current = '';
+    lastSummarizedLengthRef.current = 0;
   }, [activeSessionId, notesHistory, sessions, transcriptionText]);
 
   const handleDeleteSession = useCallback((sessionId: number, event?: React.MouseEvent) => {
@@ -463,7 +663,14 @@ function App() {
         setNotesHistory([]);
         setTranscriptionText('');
         setRealtimeTranscript('');
+        hasRealtimeTranscriptRef.current = false;
+        setLiveSummary('');
+        setSummaryStatus('idle');
+        setSummaryError(null);
+        setSummaryDebug(null);
         setActiveSlideIndex(0);
+        lastSummarySourceKeyRef.current = '';
+        lastSummarizedLengthRef.current = 0;
         return [fallbackSession];
       }
 
@@ -471,6 +678,13 @@ function App() {
         setActiveSessionId(filtered[0].id);
         setNotesHistory(filtered[0].notes);
         setTranscriptionText(filtered[0].transcriptionText);
+        hasRealtimeTranscriptRef.current = false;
+        setLiveSummary('');
+        setSummaryStatus('idle');
+        setSummaryError(null);
+        setSummaryDebug(null);
+        lastSummarySourceKeyRef.current = '';
+        lastSummarizedLengthRef.current = 0;
       }
 
       return filtered;
@@ -502,19 +716,29 @@ function App() {
       setNotesHistory(targetSession.notes);
       setTranscriptionText(targetSession.transcriptionText);
       setRealtimeTranscript('');
+      hasRealtimeTranscriptRef.current = false;
       setError(null);
       setIsGeneratingSVG(false);
       setActiveSlideIndex(0);
+      setLiveSummary('');
+      setSummaryStatus('idle');
+      setSummaryError(null);
+      setSummaryDebug(null);
+      lastSummarySourceKeyRef.current = '';
+      lastSummarizedLengthRef.current = 0;
     }
   }, [activeSessionId, notesHistory, sessions, transcriptionText]);
 
   const handleTranscription = useCallback((result: TranscriptionResult) => {
-    const cleanText = (text: string) => text.replace(/\bprison\b/gi, 'prism');
+    // If browser realtime transcript is available, never overwrite it with backend chunks.
+    const shouldUseBackendText = !hasRealtimeTranscriptRef.current;
 
-    if (result.accumulatedText) {
-      setTranscriptionText(cleanText(result.accumulatedText));
-    } else {
-      setTranscriptionText((prev) => `${prev} ${cleanText(result.text)}`.trim());
+    if (shouldUseBackendText) {
+      if (result.accumulatedText) {
+        setTranscriptionText(normalizePrismWord(result.accumulatedText));
+      } else {
+        setTranscriptionText((prev) => `${prev} ${normalizePrismWord(result.text)}`.trim());
+      }
     }
 
     setError(null);
@@ -774,7 +998,12 @@ function App() {
   }, []);
 
   const handleRealtimeTranscript = useCallback((text: string, _isFinal: boolean) => {
-    setRealtimeTranscript(text);
+    const normalized = normalizePrismWord(text);
+    setRealtimeTranscript(normalized);
+    if (normalized.trim().length > 0) {
+      hasRealtimeTranscriptRef.current = true;
+      setTranscriptionText(normalized);
+    }
   }, []);
 
   // Export functionality
@@ -1579,10 +1808,17 @@ function App() {
       // Notes are only cleared when explicitly creating a new session
       setTranscriptionText('');
       setRealtimeTranscript('');
+      hasRealtimeTranscriptRef.current = false;
+      setLiveSummary('');
+      setSummaryStatus('idle');
+      setSummaryError(null);
+      setSummaryDebug(null);
       setError(null);
       setVisualizationActive(false);
       // Don't reset idCounterRef or notesHistory to preserve existing notes
       lastCapturedTextLengthRef.current = 0;
+      lastSummarySourceKeyRef.current = '';
+      lastSummarizedLengthRef.current = 0;
       // Don't reset activeSlideIndex to stay on current slide
     }
 
@@ -1723,7 +1959,19 @@ function App() {
 
   const canGoPrev = activeSlideIndex > 0;
   const canGoNext = activeSlideIndex < totalSlides - 1;
-  const slideMode = 'notes';
+  const isSummaryMode = notesMode === 'summary';
+  const transcriptDisplayText = (
+    recordingState === 'recording' && realtimeTranscript.trim().length > 0
+      ? realtimeTranscript
+      : transcriptionText
+  ).trim();
+  const summaryStatusLabel = summaryStatus === 'updating'
+    ? 'Updating...'
+    : summaryStatus === 'ready'
+    ? 'Ready'
+    : summaryStatus === 'error'
+    ? 'Error'
+    : 'Idle';
 
   return (
     <div className="board-layout">
@@ -1987,9 +2235,23 @@ function App() {
         <section className="board-slide">
           <header className="slide-header">
             <div className="slide-mode-row">
-              <span>Mode:</span>
-              <select className="slide-mode-select" value={slideMode} disabled>
-                <option value="notes">Notes</option>
+              <span>View:</span>
+              <select
+                className="slide-mode-select"
+                value={notesMode}
+                onChange={(event) => {
+                  const nextMode = event.target.value as NotesMode;
+                  setNotesMode(nextMode);
+                  if (nextMode === 'transcript') {
+                    setSummaryError(null);
+                  } else {
+                    // force a fresh summary request when switching back to summary mode
+                    lastSummarySourceKeyRef.current = '';
+                  }
+                }}
+              >
+                <option value="transcript">Live transcript</option>
+                <option value="summary">Live summarized notes</option>
               </select>
             </div>
 
@@ -1998,18 +2260,59 @@ function App() {
 
           <div className="slide-content">
             <div className="slide-text-column">
-              {activeSlide && activeSlide.items.length > 0 ? (
-                <article className={`slide-text-item ${activeSlide.items.some(i => i.type === 'live') ? 'is-live' : ''}`}>
+              {isSummaryMode ? (
+                <article className={`slide-summary-card ${recordingState === 'recording' ? 'is-live' : ''}`}>
+                  <div className="slide-summary-header">
+                    <h3 className="slide-summary-title">Live Summarized Notes</h3>
+                    <span className={`slide-summary-status is-${summaryStatus}`}>{summaryStatusLabel}</span>
+                  </div>
+
+                  {liveSummary ? (
+                    <div className="slide-summary-content">
+                      {summaryLineGroups.paragraphLines.map((line, index) => (
+                        <p key={`summary-paragraph-${index}`} className="slide-summary-paragraph">
+                          {line}
+                        </p>
+                      ))}
+                      {summaryLineGroups.bulletLines.length > 0 && (
+                        <ul className="slide-summary-list">
+                          {summaryLineGroups.bulletLines.map((line, index) => (
+                            <li key={`summary-bullet-${index}`}>{line}</li>
+                          ))}
+                        </ul>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="slide-summary-empty">
+                      {summaryStatus === 'updating'
+                        ? 'Generating summary from live transcript...'
+                        : 'Switch to this mode while speaking to see structured notes.'}
+                    </div>
+                  )}
+
+                  {summaryError && (
+                    <div className="slide-summary-error">
+                      Summary error: {summaryError}
+                    </div>
+                  )}
+
+                  {summaryDebug && (
+                    <div className="slide-summary-debug">
+                      <span>LLM: {summaryDebug.provider}/{summaryDebug.model}</span>
+                      <span>Items: {summaryDebug.itemCount}</span>
+                      <span>Chars: {summaryDebug.inputCharacters}</span>
+                      <span>Latency: {summaryDebug.elapsedMs}ms</span>
+                      {summaryDebug.fallbackUsed && <span>Fallback in use</span>}
+                    </div>
+                  )}
+                </article>
+              ) : transcriptDisplayText ? (
+                <article className={`slide-text-item ${recordingState === 'recording' ? 'is-live' : ''}`}>
                   <p className="slide-text">
-                    {activeSlide.items.map((item, idx) => (
-                      <span key={item.key}>
-                        {idx > 0 && ' '}
-                        {item.text}
-                        {item.type === 'live' && recordingState === 'recording' && (
-                          <span className="slide-caret" />
-                        )}
-                      </span>
-                    ))}
+                    {transcriptDisplayText}
+                    {recordingState === 'recording' && (
+                      <span className="slide-caret" />
+                    )}
                   </p>
                 </article>
               ) : (
@@ -2117,6 +2420,24 @@ function App() {
                   : `say "${triggerWord}" to visualize`}
               </span>
             </div>
+
+            <div className="control-status-row">
+              <span className={`status-dot ${isSummaryMode ? 'is-active' : ''}`} />
+              <span className="control-visualization-text">
+                {isSummaryMode
+                  ? `summary mode: ${summaryStatusLabel.toLowerCase()}`
+                  : 'transcript mode: live raw text'}
+              </span>
+            </div>
+
+            {isSummaryMode && summaryDebug && (
+              <div className="control-status-row control-status-row-debug">
+                <span className="control-debug-token">{summaryDebug.provider}</span>
+                <span className="control-debug-token">{summaryDebug.model}</span>
+                <span className="control-debug-token">{summaryDebug.elapsedMs}ms</span>
+                <span className="control-debug-token">{summaryDebug.updatedAt.toLocaleTimeString()}</span>
+              </div>
+            )}
           </div>
         </section>
       </main>

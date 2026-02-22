@@ -9,7 +9,8 @@ uses anthropic claude for svg generation and openai for embeddings.
 
 import logging
 import re
-from typing import Optional, Tuple
+import time
+from typing import Any, Optional, Tuple
 
 from app.config import get_settings
 from app.models.schemas import SVGGenerationRequest, SVGGenerationResponse
@@ -86,6 +87,27 @@ transcribed text to fix:
 
 corrected text:"""
 
+# system prompt for live speech summaries shown in the slide notes panel
+SUMMARY_SYSTEM_PROMPT = """you are an educational slide summarizer.
+
+convert live transcript chunks into concise, classroom-style slide notes.
+
+output requirements:
+- return plain text only (no code blocks)
+- use exactly this structure:
+  Key Concepts
+  - ...
+  Key Details
+  - ...
+  Takeaways
+  - ...
+- each bullet must be a direct educational statement
+- never use speaker-attribution wording such as:
+  "the user stated", "the speaker said", "according to the transcript"
+- focus on concepts, definitions, mechanisms, examples, and implications
+- keep bullets concise and information-dense
+- do not invent facts that were not present in the transcript"""
+
 
 class LLMProcessor:
     """
@@ -102,7 +124,8 @@ class LLMProcessor:
             model: model identifier, defaults to settings.llm_model
         """
         self.model = model or settings.llm_model
-        self.client = None  # anthropic client for claude models
+        self.client = None  # primary llm client used for svg generation
+        self.claude_client = None  # dedicated anthropic client for claude tasks
         self.openai_client = None  # openai client for embeddings
         self._initialize_client()
 
@@ -111,16 +134,25 @@ class LLMProcessor:
         initialize the llm clients.
         uses anthropic for claude models (svg generation) and openai for embeddings.
         """
-        # initialize anthropic client for claude svg generation
-        if _is_claude_model(self.model):
-            try:
-                import anthropic
+        # initialize anthropic client independently so summaries can always use claude
+        try:
+            import anthropic
 
-                self.client = anthropic.AsyncAnthropic(api_key=settings.claude_key)
+            if settings.claude_key:
+                self.claude_client = anthropic.AsyncAnthropic(api_key=settings.claude_key)
+            else:
+                logger.warning("claude key missing, claude features unavailable")
+        except ImportError:
+            logger.warning("anthropic package not installed, claude unavailable")
+            self.claude_client = None
+
+        # initialize the primary generation client
+        if _is_claude_model(self.model):
+            self.client = self.claude_client
+            if self.client:
                 logger.info(f"llm processor initialized with claude model: {self.model}")
-            except ImportError:
-                logger.warning("anthropic package not installed, claude unavailable")
-                self.client = None
+            else:
+                logger.warning("claude model selected but claude client unavailable")
         else:
             # fallback to openai for non-claude models
             try:
@@ -140,6 +172,162 @@ class LLMProcessor:
         except ImportError:
             logger.warning("openai package not installed, embeddings unavailable")
             self.openai_client = None
+
+    def _extract_text_from_claude_response(self, content: list[Any]) -> str:
+        """
+        extract plain text from anthropic message content blocks.
+        """
+        text_blocks = []
+        for block in content:
+            block_text = getattr(block, "text", None)
+            if block_text:
+                text_blocks.append(block_text)
+
+        return "\n".join(text_blocks).strip()
+
+    def _strip_attribution_phrases(self, text: str) -> str:
+        """
+        remove narration/speaker-attribution phrasing from summary lines.
+        """
+        attribution_patterns = [
+            r"\b(the )?(user|speaker|presenter)\s+"
+            r"(stated|states|said|says|mentioned|mentions|noted|notes|"
+            r"described|describes|explained|explains|shared|shares)( that)?\b",
+            r"\baccording to (the )?(user|speaker|presenter|transcript)\b[:,]?",
+            r"\b(the )?transcript\s+(stated|states|said|says|shows|indicates)( that)?\b",
+            r"\bit was (stated|said|mentioned|noted|described|explained) that\b",
+            r"\bfrom (the )?(user|speaker|transcript)\b[:,]?",
+        ]
+
+        normalized = text
+        for pattern in attribution_patterns:
+            normalized = re.sub(pattern, "", normalized, flags=re.IGNORECASE)
+
+        normalized = re.sub(r"^\s*(that|about|regarding)\s+", "", normalized, flags=re.IGNORECASE)
+        normalized = re.sub(r"\s+", " ", normalized).strip(" -:;,")
+        return normalized
+
+    def _format_structured_slide_summary(self, bullets: list[str]) -> str:
+        """
+        force a stable slide-friendly structure with fixed sections.
+        """
+        normalized_unique: list[str] = []
+        seen: set[str] = set()
+
+        for bullet in bullets:
+            cleaned = self._strip_attribution_phrases(bullet)
+            cleaned = re.sub(r"^[#>\-*]+", "", cleaned).strip()
+            if not cleaned:
+                continue
+            key = cleaned.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            normalized_unique.append(cleaned)
+
+        if not normalized_unique:
+            normalized_unique = ["Core ideas are being captured in real time."]
+
+        concept_bullets = normalized_unique[0:3]
+        detail_bullets = normalized_unique[3:6]
+        takeaway_bullets = normalized_unique[6:9]
+
+        if not detail_bullets:
+            detail_bullets = ["Additional supporting details will appear as more transcript is captured."]
+        if not takeaway_bullets:
+            takeaway_bullets = ["Practical implications will be summarized as the discussion continues."]
+
+        sections = [
+            ("Key Concepts", concept_bullets),
+            ("Key Details", detail_bullets),
+            ("Takeaways", takeaway_bullets),
+        ]
+
+        output_lines: list[str] = []
+        for idx, (title, section_bullets) in enumerate(sections):
+            output_lines.append(title)
+            for line in section_bullets:
+                output_lines.append(f"- {line}")
+            if idx < len(sections) - 1:
+                output_lines.append("")
+
+        return "\n".join(output_lines)
+
+    def _normalize_summary(self, summary_text: str, fallback: str) -> str:
+        """
+        normalize summary output into slide-friendly bullet formatting.
+        """
+        cleaned = summary_text.strip()
+        if not cleaned:
+            return fallback
+
+        lines = [line.strip() for line in cleaned.splitlines() if line.strip()]
+        if not lines:
+            return fallback
+
+        bullet_pattern = re.compile(r"^([*-]|\u2022|\d+[.)])\s+")
+        heading_pattern = re.compile(
+            r"^(#{1,6}\s*)?(key concepts?|key details?|takeaways?|summary|main ideas?)\s*:?\s*$",
+            re.IGNORECASE,
+        )
+        normalized_bullets: list[str] = []
+
+        for line in lines:
+            line_text = line
+            if heading_pattern.match(line_text):
+                continue
+
+            line_match = bullet_pattern.match(line_text)
+            line_candidates: list[str]
+            if line_match:
+                line_candidates = [line_text[line_match.end():]]
+            else:
+                # split prose lines into sentence-level bullets
+                line_candidates = re.split(r"(?<=[.!?])\s+", line_text)
+
+            for candidate in line_candidates:
+                cleaned_candidate = self._strip_attribution_phrases(candidate)
+                if cleaned_candidate:
+                    normalized_bullets.append(cleaned_candidate)
+
+        # if we could not parse lines into useful bullets, split prose into sentence bullets
+        if not normalized_bullets:
+            sentence_candidates = re.split(r"(?<=[.!?])\s+", " ".join(lines))
+            normalized_bullets = [
+                self._strip_attribution_phrases(sentence.strip())
+                for sentence in sentence_candidates
+                if sentence.strip()
+            ]
+            normalized_bullets = [bullet for bullet in normalized_bullets if bullet]
+
+        bullets = normalized_bullets[:9]
+        if not bullets:
+            return fallback
+
+        return self._format_structured_slide_summary(bullets)
+
+    def _build_fallback_summary(self, cleaned: list[str]) -> str:
+        """
+        deterministic fallback summary used when llm summarization fails.
+        """
+        if not cleaned:
+            return self._format_structured_slide_summary(
+                ["No transcript content is available yet."]
+            )
+
+        # build fallback bullets from recent transcript sentences
+        recent_text = " ".join(cleaned[-5:])
+        sentence_candidates = re.split(r"(?<=[.!?])\s+", recent_text)
+        bullets = [
+            self._strip_attribution_phrases(sentence.strip())
+            for sentence in sentence_candidates
+            if sentence.strip()
+        ]
+        bullets = [bullet for bullet in bullets if bullet][:9]
+        if not bullets:
+            bullets = [self._strip_attribution_phrases(cleaned[-1][:220])]
+
+        return self._format_structured_slide_summary(bullets)
 
     def _build_prompt(self, request: SVGGenerationRequest) -> str:
         """
@@ -350,62 +538,110 @@ class LLMProcessor:
                 original_text=request.text,
             )
 
-    async def generate_brief_summary(self, texts: list[str]) -> str:
+    async def generate_brief_summary_with_debug(self, texts: list[str]) -> dict[str, Any]:
         """
-        generate a short summary from a list of user speech/text segments.
-        uses a smaller model for lightweight, low-cost summarization.
+        generate a concise live summary and return debug metadata.
+        prioritizes claude for summaries and falls back gracefully.
         """
         cleaned = [text.strip() for text in texts if text and text.strip()]
-        if not cleaned:
-            return "No user speech content was provided."
+        input_characters = sum(len(text) for text in cleaned)
+        fallback_summary = self._build_fallback_summary(cleaned)
 
-        fallback_summary = (
-            f"Captured {len(cleaned)} speech segments. "
-            f"Latest content: {cleaned[-1][:180]}"
+        if not cleaned:
+            return {
+                "summary": self._build_fallback_summary([]),
+                "provider": "fallback",
+                "model": "rules-based",
+                "fallback_used": True,
+                "input_characters": 0,
+                "elapsed_ms": 0,
+            }
+
+        # keep input bounded for fast summarization
+        snippets = cleaned[:40]
+        formatted_text = "\n".join(
+            f"{idx + 1}. {snippet[:700]}" for idx, snippet in enumerate(snippets)
+        )
+        prompt = (
+            "Convert this live transcript into educational slide notes.\n"
+            "Use exactly these sections: Key Concepts, Key Details, Takeaways.\n"
+            "Under each section, return concise bullets only.\n"
+            "Do not use speaker-attribution wording.\n\n"
+            f"{formatted_text}"
         )
 
-        if not self.openai_client:
-            return fallback_summary
+        # primary path: claude
+        if self.claude_client:
+            started = time.perf_counter()
+            try:
+                response = await self.claude_client.messages.create(
+                    model=settings.summary_llm_model,
+                    max_tokens=500,
+                    temperature=0.2,
+                    system=SUMMARY_SYSTEM_PROMPT,
+                    messages=[
+                        {"role": "user", "content": prompt},
+                    ],
+                )
+                raw_summary = self._extract_text_from_claude_response(response.content)
+                summary = self._normalize_summary(raw_summary, fallback_summary)
+                elapsed_ms = int((time.perf_counter() - started) * 1000)
 
-        try:
-            # keep input bounded for fast summarization
-            snippets = cleaned[:40]
-            formatted_text = "\n".join(
-                f"{idx + 1}. {snippet[:500]}" for idx, snippet in enumerate(snippets)
-            )
+                return {
+                    "summary": summary,
+                    "provider": "claude",
+                    "model": settings.summary_llm_model,
+                    "fallback_used": False,
+                    "input_characters": input_characters,
+                    "elapsed_ms": elapsed_ms,
+                }
+            except Exception as e:
+                logger.error(f"claude summary generation error: {e}")
 
-            response = await self.openai_client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[
-                    {
-                        "role": "system",
-                        "content": (
-                            "You summarize user speech notes. "
-                            "Return a simple, concise summary in plain text. "
-                            "Keep it short (3-6 sentences). "
-                            "Do not include markdown or code blocks."
-                        ),
-                    },
-                    {
-                        "role": "user",
-                        "content": (
-                            "Summarize these speech notes:\n\n"
-                            f"{formatted_text}"
-                        ),
-                    },
-                ],
-                temperature=0.2,
-                max_tokens=220,
-            )
+        # secondary fallback: openai (if available)
+        if self.openai_client:
+            started = time.perf_counter()
+            try:
+                response = await self.openai_client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=[
+                        {"role": "system", "content": SUMMARY_SYSTEM_PROMPT},
+                        {"role": "user", "content": prompt},
+                    ],
+                    temperature=0.2,
+                    max_tokens=320,
+                )
+                raw_summary = (response.choices[0].message.content or "").strip()
+                summary = self._normalize_summary(raw_summary, fallback_summary)
+                elapsed_ms = int((time.perf_counter() - started) * 1000)
 
-            summary = (response.choices[0].message.content or "").strip()
-            if not summary:
-                return fallback_summary
+                return {
+                    "summary": summary,
+                    "provider": "openai",
+                    "model": "gpt-4o-mini",
+                    "fallback_used": False,
+                    "input_characters": input_characters,
+                    "elapsed_ms": elapsed_ms,
+                }
+            except Exception as e:
+                logger.error(f"openai summary generation fallback error: {e}")
 
-            return summary
-        except Exception as e:
-            logger.error(f"summary generation error: {e}")
-            return fallback_summary
+        logger.warning("summary generation falling back to deterministic formatter")
+        return {
+            "summary": fallback_summary,
+            "provider": "fallback",
+            "model": "rules-based",
+            "fallback_used": True,
+            "input_characters": input_characters,
+            "elapsed_ms": 0,
+        }
+
+    async def generate_brief_summary(self, texts: list[str]) -> str:
+        """
+        generate a short summary from user speech/text segments.
+        """
+        summary_payload = await self.generate_brief_summary_with_debug(texts)
+        return str(summary_payload["summary"])
 
     async def correct_grammar(self, text: str) -> str:
         """
