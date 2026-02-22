@@ -1,20 +1,13 @@
-/**
- * main application component.
- * features a sidebar with session management and main content area.
- * keeps working transcription logic intact.
- */
-
-import { useState, useCallback, useRef, useEffect } from 'react';
+import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
 import { AudioRecorder } from './components/AudioRecorder';
-import { SVGRenderer } from './components/SVGRenderer';
 import {
   TranscriptionResult,
   SVGGenerationResponse,
   ChartGenerationResponse,
   RecordingState,
+  ConnectionState,
 } from './types';
 
-// interface for storing notes history (text-only, svg, or chart)
 interface NoteHistoryItem {
   id: number;
   type: 'text' | 'svg' | 'chart';
@@ -31,7 +24,6 @@ interface NoteHistoryItem {
   similarityThreshold?: number;
 }
 
-// interface for a session
 interface Session {
   id: number;
   name: string;
@@ -39,18 +31,95 @@ interface Session {
   transcriptionText: string;
 }
 
+type SlideItemType = NoteHistoryItem['type'] | 'live';
+
+interface SlideSourceItem {
+  id: number;
+  type: SlideItemType;
+  newTextDelta: string;
+  generationMode?: NoteHistoryItem['generationMode'];
+  similarityScore?: number | null;
+  svg?: string;
+  chartImage?: string;
+  description?: string;
+}
+
+interface SlideRenderItem extends SlideSourceItem {
+  key: string;
+  text: string;
+  isContinuation: boolean;
+}
+
+interface SlidePage {
+  id: number;
+  items: SlideRenderItem[];
+}
+
+const SLIDE_CHAR_LIMIT = 900;
+const VISUAL_CHAR_COST = 520;
+const MIN_CHUNK_CHARS = 160;
+
+function isRenderableSvg(svgCode?: string): boolean {
+  if (!svgCode) {
+    return false;
+  }
+
+  const trimmed = svgCode.trim();
+  return /^<svg[\s>]/i.test(trimmed) && /<\/svg>\s*$/i.test(trimmed);
+}
+
+function takeTextChunk(text: string, maxChars: number): [string, string] {
+  const normalized = text.trim();
+  if (normalized.length <= maxChars) {
+    return [normalized, ''];
+  }
+
+  const candidate = normalized.slice(0, maxChars);
+  const breakPoint = candidate.lastIndexOf(' ');
+  const cutPoint = breakPoint > Math.floor(maxChars * 0.6) ? breakPoint : maxChars;
+
+  return [
+    normalized.slice(0, cutPoint).trim(),
+    normalized.slice(cutPoint).trim(),
+  ];
+}
+
+function getSlideItemLabel(item: SlideRenderItem): string {
+  if (item.type === 'live') {
+    return 'Listening...';
+  }
+  if (item.type === 'text') {
+    return item.isContinuation ? 'Note continued' : 'Note';
+  }
+  if (item.type === 'chart') {
+    return item.isContinuation ? 'Chart note continued' : 'Chart generated';
+  }
+  if (item.generationMode === 'enhanced') {
+    return item.isContinuation ? 'Enhanced visualization continued' : 'Enhanced visualization';
+  }
+  if (item.generationMode === 'new_topic') {
+    return item.isContinuation ? 'New topic continued' : 'New topic detected';
+  }
+  return item.isContinuation ? 'Visualization continued' : 'Visualization generated';
+}
+
+function getSessionShortLabel(name: string): string {
+  const match = name.match(/(\d+)$/);
+  if (match) {
+    return `S${match[1]}`;
+  }
+  return name.charAt(0).toUpperCase();
+}
+
 function App() {
-  // ==================== SESSION MANAGEMENT ====================
   const [sessions, setSessions] = useState<Session[]>([
-    { id: 1, name: 'Session 1', notes: [], transcriptionText: '' }
+    { id: 1, name: 'Session 1', notes: [], transcriptionText: '' },
   ]);
   const [activeSessionId, setActiveSessionId] = useState(1);
   const sessionCounterRef = useRef(1);
 
-  // theme state
-  const [isDarkMode, setIsDarkMode] = useState(true);
+  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
 
-  // ==================== ORIGINAL WORKING STATE ====================
   const [transcriptionText, setTranscriptionText] = useState('');
   const [realtimeTranscript, setRealtimeTranscript] = useState('');
   const [notesHistory, setNotesHistory] = useState<NoteHistoryItem[]>([]);
@@ -60,16 +129,15 @@ function App() {
   const [deactivatePhrase] = useState('thank you');
   const [error, setError] = useState<string | null>(null);
   const [recordingState, setRecordingState] = useState<RecordingState>('idle');
+  const [connectionState, setConnectionState] = useState<ConnectionState>('disconnected');
+  const [activeSlideIndex, setActiveSlideIndex] = useState(0);
+
   const idCounterRef = useRef(0);
-  const listEndRef = useRef<HTMLDivElement>(null);
-  // track last captured text length for creating text-only notes
   const lastCapturedTextLengthRef = useRef(0);
 
-  // refs for session saving (avoid dependency cycles in callbacks)
   const transcriptionTextRef = useRef(transcriptionText);
   const notesHistoryRef = useRef(notesHistory);
 
-  // keep refs in sync with state
   useEffect(() => {
     transcriptionTextRef.current = transcriptionText;
   }, [transcriptionText]);
@@ -78,21 +146,12 @@ function App() {
     notesHistoryRef.current = notesHistory;
   }, [notesHistory]);
 
-  // auto-scroll to latest note
-  useEffect(() => {
-    if (listEndRef.current) {
-      listEndRef.current.scrollIntoView({ behavior: 'smooth' });
-    }
-  }, [notesHistory]);
-
-  // create text-only notes periodically when recording but visualization is off
   useEffect(() => {
     if (recordingState !== 'recording') {
       return;
     }
 
     const interval = setInterval(() => {
-      // only create text notes when visualization is OFF
       if (visualizationActive) {
         return;
       }
@@ -101,7 +160,6 @@ function App() {
       const lastLength = lastCapturedTextLengthRef.current;
       const newText = currentText.slice(lastLength).trim();
 
-      // only create note if there's substantial new text (at least 10 chars)
       if (newText.length >= 10) {
         const newNote: NoteHistoryItem = {
           id: idCounterRef.current++,
@@ -111,22 +169,20 @@ function App() {
           timestamp: new Date(),
           generationMode: 'text',
         };
-        setNotesHistory(prev => [...prev, newNote]);
+        setNotesHistory((prev) => [...prev, newNote]);
         lastCapturedTextLengthRef.current = currentText.length;
       }
-    }, 5000); // check every 5 seconds
+    }, 5000);
 
     return () => clearInterval(interval);
   }, [recordingState, visualizationActive]);
 
-  // ==================== SESSION HANDLERS ====================
   const handleNewSession = useCallback(() => {
-    // Save current session first
-    setSessions(prev => prev.map(s =>
-      s.id === activeSessionId
-        ? { ...s, notes: notesHistory, transcriptionText }
-        : s
-    ));
+    setSessions((prev) => prev.map((session) => (
+      session.id === activeSessionId
+        ? { ...session, notes: notesHistory, transcriptionText }
+        : session
+    )));
 
     sessionCounterRef.current += 1;
     const newSession: Session = {
@@ -135,19 +191,28 @@ function App() {
       notes: [],
       transcriptionText: '',
     };
-    setSessions(prev => [newSession, ...prev]);
+
+    setSessions((prev) => [newSession, ...prev]);
     setActiveSessionId(newSession.id);
     setNotesHistory([]);
     setTranscriptionText('');
+    setRealtimeTranscript('');
+    setIsGeneratingSVG(false);
+    setVisualizationActive(false);
+    setError(null);
+    setActiveSlideIndex(0);
     idCounterRef.current = 0;
+    lastCapturedTextLengthRef.current = 0;
   }, [activeSessionId, notesHistory, transcriptionText]);
 
-  const handleDeleteSession = useCallback((sessionId: number, e: React.MouseEvent) => {
-    e.stopPropagation();
-    setSessions(prev => {
-      const filtered = prev.filter(s => s.id !== sessionId);
+  const handleDeleteSession = useCallback((sessionId: number, event: React.MouseEvent) => {
+    event.stopPropagation();
+
+    setSessions((prev) => {
+      const filtered = prev.filter((session) => session.id !== sessionId);
+
       if (filtered.length === 0) {
-        const newSession: Session = {
+        const fallbackSession: Session = {
           id: 1,
           name: 'Session 1',
           notes: [],
@@ -157,43 +222,49 @@ function App() {
         setActiveSessionId(1);
         setNotesHistory([]);
         setTranscriptionText('');
-        return [newSession];
+        setRealtimeTranscript('');
+        setActiveSlideIndex(0);
+        return [fallbackSession];
       }
+
       if (sessionId === activeSessionId) {
         setActiveSessionId(filtered[0].id);
         setNotesHistory(filtered[0].notes);
         setTranscriptionText(filtered[0].transcriptionText);
       }
+
       return filtered;
     });
   }, [activeSessionId]);
 
   const handleSwitchSession = useCallback((sessionId: number) => {
-    // Save current session
-    setSessions(prev => prev.map(s =>
-      s.id === activeSessionId
-        ? { ...s, notes: notesHistory, transcriptionText }
-        : s
-    ));
+    setSessions((prev) => prev.map((session) => (
+      session.id === activeSessionId
+        ? { ...session, notes: notesHistory, transcriptionText }
+        : session
+    )));
 
-    const session = sessions.find(s => s.id === sessionId);
-    if (session) {
+    const targetSession = sessions.find((session) => session.id === sessionId);
+    if (targetSession) {
       setActiveSessionId(sessionId);
-      setNotesHistory(session.notes);
-      setTranscriptionText(session.transcriptionText);
+      setNotesHistory(targetSession.notes);
+      setTranscriptionText(targetSession.transcriptionText);
+      setRealtimeTranscript('');
+      setError(null);
+      setIsGeneratingSVG(false);
+      setActiveSlideIndex(0);
     }
-  }, [activeSessionId, notesHistory, transcriptionText, sessions]);
+  }, [activeSessionId, notesHistory, sessions, transcriptionText]);
 
-  // ==================== TRANSCRIPTION CALLBACK ====================
   const handleTranscription = useCallback((result: TranscriptionResult) => {
-    // replace "prison" with "prism" (common misrecognition)
     const cleanText = (text: string) => text.replace(/\bprison\b/gi, 'prism');
 
     if (result.accumulatedText) {
       setTranscriptionText(cleanText(result.accumulatedText));
     } else {
-      setTranscriptionText((prev) => prev + ' ' + cleanText(result.text));
+      setTranscriptionText((prev) => `${prev} ${cleanText(result.text)}`.trim());
     }
+
     setError(null);
 
     if (typeof (result as any).visualizationActive === 'boolean') {
@@ -202,7 +273,9 @@ function App() {
   }, []);
 
   const handleSVGGenerated = useCallback((response: SVGGenerationResponse) => {
-    if (response.svg && !response.error) {
+    const hasValidSvg = isRenderableSvg(response.svg);
+
+    if (hasValidSvg && !response.error) {
       const newItem: NoteHistoryItem = {
         id: idCounterRef.current++,
         type: 'svg',
@@ -216,14 +289,19 @@ function App() {
         similarityThreshold: response.similarityThreshold,
       };
 
-      // update captured text length to prevent duplicate text-only notes
       lastCapturedTextLengthRef.current = transcriptionTextRef.current.length;
 
       if (response.generationMode === 'enhanced') {
         setNotesHistory((prev) => {
-          if (prev.length === 0) return [newItem];
-          const lastSvgIndex = prev.map(item => item.type).lastIndexOf('svg');
-          if (lastSvgIndex === -1) return [...prev, newItem];
+          if (prev.length === 0) {
+            return [newItem];
+          }
+
+          const lastSvgIndex = prev.map((item) => item.type).lastIndexOf('svg');
+          if (lastSvgIndex === -1) {
+            return [...prev, newItem];
+          }
+
           const updated = [...prev];
           updated[lastSvgIndex] = { ...newItem, id: prev[lastSvgIndex].id };
           return updated;
@@ -232,7 +310,9 @@ function App() {
         setNotesHistory((prev) => [...prev, newItem]);
       }
     }
+
     setIsGeneratingSVG(false);
+
     if (response.error) {
       setError(response.error);
     }
@@ -252,11 +332,13 @@ function App() {
         timestamp: new Date(),
         generationMode: 'chart',
       };
-      // update captured text length to prevent duplicate text-only notes
+
       lastCapturedTextLengthRef.current = transcriptionTextRef.current.length;
       setNotesHistory((prev) => [...prev, newItem]);
     }
+
     setIsGeneratingSVG(false);
+
     if (response.error) {
       setError(response.error);
     }
@@ -267,18 +349,15 @@ function App() {
     setIsGeneratingSVG(false);
   }, []);
 
-  // handle real-time transcript from browser speech recognition
   const handleRealtimeTranscript = useCallback((text: string, _isFinal: boolean) => {
     setRealtimeTranscript(text);
   }, []);
 
-  // ref to track previous state for transition detection
   const prevRecordingStateRef = useRef<RecordingState>('idle');
 
   const handleRecordingStateChange = useCallback((state: RecordingState) => {
     const prevState = prevRecordingStateRef.current;
 
-    // only update if state actually changed
     if (prevState === state) {
       return;
     }
@@ -286,7 +365,6 @@ function App() {
     prevRecordingStateRef.current = state;
     setRecordingState(state);
 
-    // only clear on transition TO recording (not if already recording)
     if (state === 'recording' && prevState !== 'recording') {
       setTranscriptionText('');
       setRealtimeTranscript('');
@@ -295,6 +373,7 @@ function App() {
       setVisualizationActive(false);
       idCounterRef.current = 0;
       lastCapturedTextLengthRef.current = 0;
+      setActiveSlideIndex(0);
     }
 
     if (state === 'processing') {
@@ -303,96 +382,174 @@ function App() {
 
     if (state === 'idle') {
       setVisualizationActive(false);
-      // Save session when recording stops (use refs to avoid dependency cycles)
-      setSessions(prev => prev.map(s =>
-        s.id === activeSessionId
-          ? { ...s, notes: notesHistoryRef.current, transcriptionText: transcriptionTextRef.current }
-          : s
-      ));
+      setSessions((prev) => prev.map((session) => (
+        session.id === activeSessionId
+          ? {
+              ...session,
+              notes: notesHistoryRef.current,
+              transcriptionText: transcriptionTextRef.current,
+            }
+          : session
+      )));
     }
   }, [activeSessionId]);
 
-  // ==================== THEME COLORS ====================
-  const theme = {
-    bg: isDarkMode ? '#1a1a1a' : '#ffffff',
-    sidebar: isDarkMode ? '#242424' : '#f5f5f5',
-    sidebarHover: isDarkMode ? '#333333' : '#e8e8e8',
-    text: isDarkMode ? '#ffffff' : '#1a1a1a',
-    textSecondary: isDarkMode ? '#a0a0a0' : '#666666',
-    border: isDarkMode ? '#333333' : '#e0e0e0',
-    accent: '#4ade80',
-  };
+  const slideSources = useMemo<SlideSourceItem[]>(() => {
+    const historyItems: SlideSourceItem[] = notesHistory.map((note) => ({
+      id: note.id,
+      type: note.type,
+      newTextDelta: note.newTextDelta,
+      generationMode: note.generationMode,
+      similarityScore: note.similarityScore,
+      svg: note.svg,
+      chartImage: note.chartImage,
+      description: note.description,
+    }));
+
+    const liveText = realtimeTranscript.trim();
+    if (recordingState === 'recording' && liveText) {
+      historyItems.push({
+        id: -1,
+        type: 'live',
+        newTextDelta: liveText,
+        generationMode: 'text',
+      });
+    }
+
+    return historyItems;
+  }, [notesHistory, realtimeTranscript, recordingState]);
+
+  const slidePages = useMemo<SlidePage[]>(() => {
+    const pages: SlidePage[] = [];
+    let currentItems: SlideRenderItem[] = [];
+    let usedChars = 0;
+
+    const pushPage = () => {
+      pages.push({
+        id: pages.length + 1,
+        items: currentItems,
+      });
+      currentItems = [];
+      usedChars = 0;
+    };
+
+    slideSources.forEach((source) => {
+      const hasVisual = source.type === 'chart'
+        || (source.type === 'svg' && isRenderableSvg(source.svg));
+      let remainingText = source.newTextDelta.trim();
+
+      if (!remainingText) {
+        remainingText = hasVisual
+          ? 'Visualization generated from your latest notes.'
+          : source.type === 'live'
+          ? 'Listening...'
+          : 'Note captured.';
+      }
+
+      let chunkIndex = 0;
+
+      while (remainingText.length > 0) {
+        const visualCost = hasVisual && chunkIndex === 0 ? VISUAL_CHAR_COST : 0;
+        const room = SLIDE_CHAR_LIMIT - usedChars - visualCost;
+
+        if (room < MIN_CHUNK_CHARS && currentItems.length > 0) {
+          pushPage();
+          continue;
+        }
+
+        const [chunk, remainder] = takeTextChunk(remainingText, Math.max(room, MIN_CHUNK_CHARS));
+        const safeChunk = chunk || remainingText;
+
+        currentItems.push({
+          ...source,
+          key: `${source.id}-${chunkIndex}-${pages.length}`,
+          text: safeChunk,
+          svg: chunkIndex === 0 ? source.svg : undefined,
+          chartImage: chunkIndex === 0 ? source.chartImage : undefined,
+          isContinuation: chunkIndex > 0,
+        });
+
+        usedChars += Math.max(safeChunk.length, MIN_CHUNK_CHARS) + visualCost;
+        remainingText = remainder;
+        chunkIndex += 1;
+
+        if (remainingText.length > 0) {
+          pushPage();
+        }
+      }
+    });
+
+    if (currentItems.length > 0 || pages.length === 0) {
+      pushPage();
+    }
+
+    return pages;
+  }, [slideSources]);
+
+  const totalSlides = slidePages.length;
+  const activeSlide = slidePages[activeSlideIndex] || slidePages[Math.max(totalSlides - 1, 0)];
+  const activeVisual = activeSlide?.items
+    .filter((item) => item.type === 'chart' || (item.type === 'svg' && isRenderableSvg(item.svg)))
+    .slice(-1)[0];
+
+  const previousSlideCountRef = useRef(totalSlides);
+  useEffect(() => {
+    setActiveSlideIndex((prev) => Math.min(prev, Math.max(totalSlides - 1, 0)));
+  }, [totalSlides]);
+
+  useEffect(() => {
+    if (totalSlides > previousSlideCountRef.current) {
+      setActiveSlideIndex(totalSlides - 1);
+    }
+    previousSlideCountRef.current = totalSlides;
+  }, [totalSlides]);
+
+  const previousSessionIdRef = useRef(activeSessionId);
+  useEffect(() => {
+    if (previousSessionIdRef.current !== activeSessionId) {
+      setActiveSlideIndex(Math.max(totalSlides - 1, 0));
+      previousSessionIdRef.current = activeSessionId;
+    }
+  }, [activeSessionId, totalSlides]);
+
+  const canGoPrev = activeSlideIndex > 0;
+  const canGoNext = activeSlideIndex < totalSlides - 1;
+  const slideMode = 'notes';
 
   return (
-    <div style={{
-      display: 'flex',
-      minHeight: '100vh',
-      backgroundColor: theme.bg,
-      color: theme.text,
-      fontFamily: 'Inter, system-ui, sans-serif',
-    }}>
-      {/* ==================== SIDEBAR ==================== */}
-      <aside style={{
-        width: '260px',
-        backgroundColor: theme.sidebar,
-        borderRight: `1px solid ${theme.border}`,
-        display: 'flex',
-        flexDirection: 'column',
-        flexShrink: 0,
-      }}>
-        {/* New Board Button */}
+    <div className="board-layout">
+      <aside className={`board-sidebar ${isSidebarCollapsed ? 'is-collapsed' : ''}`}>
         <button
-          onClick={handleNewSession}
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: '8px',
-            padding: '12px 16px',
-            margin: '12px',
-            backgroundColor: 'transparent',
-            border: `1px solid ${theme.border}`,
-            borderRadius: '8px',
-            color: theme.text,
-            cursor: 'pointer',
-            fontSize: '14px',
-            fontWeight: 500,
-          }}
+          type="button"
+          className="sidebar-toggle"
+          onClick={() => setIsSidebarCollapsed((prev) => !prev)}
+          aria-label={isSidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
         >
-          <span style={{ fontSize: '18px' }}>+</span>
-          New Board
+          {isSidebarCollapsed ? '>' : '<'}
         </button>
 
-        {/* Sessions List */}
-        <div style={{ flex: 1, overflowY: 'auto', padding: '0 12px' }}>
-          {sessions.map(session => (
+        <button type="button" className="board-new-session" onClick={handleNewSession}>
+          <span className="new-session-plus">+</span>
+          {!isSidebarCollapsed && <span>New Board</span>}
+        </button>
+
+        <div className="board-session-list">
+          {sessions.map((session) => (
             <div
               key={session.id}
+              className={`board-session-item ${session.id === activeSessionId ? 'is-active' : ''}`}
               onClick={() => handleSwitchSession(session.id)}
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'space-between',
-                padding: '10px 12px',
-                marginBottom: '4px',
-                backgroundColor: session.id === activeSessionId ? theme.sidebarHover : 'transparent',
-                borderRadius: '6px',
-                cursor: 'pointer',
-              }}
             >
-              <span style={{ fontSize: '14px' }}>{session.name}</span>
+              <span className="session-label">
+                {isSidebarCollapsed ? getSessionShortLabel(session.name) : session.name}
+              </span>
               <button
-                onClick={(e) => handleDeleteSession(session.id, e)}
-                style={{
-                  background: 'none',
-                  border: 'none',
-                  color: theme.textSecondary,
-                  cursor: 'pointer',
-                  padding: '4px',
-                  display: 'flex',
-                  opacity: 0.6,
-                }}
+                type="button"
+                className="session-delete"
+                onClick={(event) => handleDeleteSession(session.id, event)}
+                aria-label={`Delete ${session.name}`}
               >
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                   <path d="M3 6h18M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2" />
                 </svg>
               </button>
@@ -400,204 +557,143 @@ function App() {
           ))}
         </div>
 
-        {/* Bottom Section */}
-        <div style={{ padding: '16px', borderTop: `1px solid ${theme.border}` }}>
-          <h2 style={{ fontSize: '18px', fontWeight: 600, marginBottom: '16px' }}>Board</h2>
-          <button
-            onClick={() => setIsDarkMode(!isDarkMode)}
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: '8px',
-              padding: '8px 0',
-              background: 'none',
-              border: 'none',
-              color: theme.accent,
-              cursor: 'pointer',
-              fontSize: '14px',
-            }}
-          >
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              {isDarkMode ? (
-                <><circle cx="12" cy="12" r="5"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></>
-              ) : (
-                <path d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z"/>
-              )}
-            </svg>
-            {isDarkMode ? 'Light mode' : 'Dark mode'}
-          </button>
+        <div className="board-sidebar-footer">
+          {!isSidebarCollapsed && (
+            <>
+              <p className="board-brand">PRISM</p>
+              <button type="button" className="board-footer-link">Settings</button>
+              <button type="button" className="board-footer-link">Updates & FAQ</button>
+            </>
+          )}
         </div>
       </aside>
 
-      {/* ==================== MAIN CONTENT ==================== */}
-      <main style={{
-        flex: 1,
-        display: 'flex',
-        flexDirection: 'column',
-        padding: '32px 48px',
-        overflowY: 'auto',
-      }}>
-        {/* Error Display */}
-        {error && (
-          <div style={{
-            padding: '12px 16px',
-            backgroundColor: 'rgba(239, 68, 68, 0.1)',
-            color: '#ef4444',
-            borderRadius: '8px',
-            marginBottom: '24px',
-          }}>
-            {error}
-          </div>
-        )}
+      <main className="board-main">
+        {error && <div className="board-error">{error}</div>}
 
-        {/* Notes History */}
-        <div style={{ flex: 1, marginTop: '24px' }}>
-          {notesHistory.map((item, index) => {
-            const isLatest = index === notesHistory.length - 1 && recordingState === 'recording';
-            return (
-              <div
-                key={item.id}
-                style={{
-                  display: 'flex',
-                  gap: '32px',
-                  marginBottom: '32px',
-                  alignItems: 'flex-start',
-                  padding: isLatest ? '16px' : '0',
-                  backgroundColor: isLatest ? (isDarkMode ? 'rgba(74, 222, 128, 0.1)' : 'rgba(74, 222, 128, 0.15)') : 'transparent',
-                  border: isLatest ? `1px solid ${theme.accent}` : 'none',
-                  borderRadius: isLatest ? '8px' : '0',
-                }}
-              >
-                {/* Text on left */}
-                <div style={{ flex: 1 }}>
-                  <p style={{ fontSize: '16px', lineHeight: 1.7, marginBottom: '8px' }}>
-                    {item.newTextDelta}
-                  </p>
-                  <p style={{ fontSize: '14px', color: item.type === 'text' ? theme.textSecondary : theme.accent }}>
-                    {item.type === 'text' ? 'Note' :
-                     item.generationMode === 'enhanced' ? 'Enhanced visualization' :
-                     item.generationMode === 'new_topic' ? 'New topic detected' :
-                     item.type === 'chart' ? 'Chart generated' : 'Initial visualization'}
-                  </p>
-                  {item.similarityScore != null && (
-                    <p style={{ fontSize: '12px', color: theme.textSecondary }}>
-                      Similarity: {(item.similarityScore * 100).toFixed(0)}%
+        <section className="board-slide">
+          <header className="slide-header">
+            <div className="slide-mode-row">
+              <span>Mode:</span>
+              <select className="slide-mode-select" value={slideMode} disabled>
+                <option value="notes">Notes</option>
+              </select>
+            </div>
+
+            <div className="slide-count">Slide {Math.min(activeSlideIndex + 1, totalSlides)} / {totalSlides}</div>
+          </header>
+
+          <div className="slide-content">
+            <div className="slide-text-column">
+              {activeSlide && activeSlide.items.length > 0 ? (
+                activeSlide.items.map((item) => (
+                  <article
+                    key={item.key}
+                    className={`slide-text-item ${item.type === 'live' ? 'is-live' : ''}`}
+                  >
+                    <p className="slide-text">
+                      {item.text}
+                      {item.type === 'live' && recordingState === 'recording' && (
+                        <span className="slide-caret" />
+                      )}
                     </p>
-                  )}
+
+                    <div className="slide-meta-row">
+                      <span>{getSlideItemLabel(item)}</span>
+                      {item.similarityScore != null && (
+                        <span>Similarity {(item.similarityScore * 100).toFixed(0)}%</span>
+                      )}
+                    </div>
+                  </article>
+                ))
+              ) : (
+                <div className="slide-empty">Notes will appear here as soon as recording starts.</div>
+              )}
+            </div>
+
+            <div className="slide-visual-column">
+              {activeVisual?.type === 'chart' && activeVisual.chartImage ? (
+                <img
+                  className="slide-visual-image"
+                  src={`data:image/png;base64,${activeVisual.chartImage}`}
+                  alt={activeVisual.description || 'Generated chart'}
+                />
+              ) : activeVisual?.type === 'svg' && activeVisual.svg ? (
+                <div
+                  className="slide-visual-svg"
+                  dangerouslySetInnerHTML={{ __html: activeVisual.svg }}
+                />
+              ) : (
+                <div className="slide-visual-placeholder">
+                  {isGeneratingSVG
+                    ? 'Generating visualization...'
+                    : 'Visual output for this slide appears here.'}
                 </div>
-
-                {/* Visualization on right - only show if there's a visualization */}
-                {(item.type === 'chart' || item.type === 'svg') && (
-                  <div style={{ width: '280px', flexShrink: 0 }}>
-                    {item.type === 'chart' && item.chartImage ? (
-                      <img
-                        src={`data:image/png;base64,${item.chartImage}`}
-                        alt={item.description || 'Chart'}
-                        style={{ width: '100%', borderRadius: '8px' }}
-                      />
-                    ) : item.svg ? (
-                      <div
-                        style={{ width: '100%', borderRadius: '8px', overflow: 'hidden', backgroundColor: '#f0f0f0' }}
-                        dangerouslySetInnerHTML={{ __html: item.svg }}
-                      />
-                    ) : null}
-                  </div>
-                )}
-              </div>
-            );
-          })}
-
-          {/* Live transcript as the current note being typed */}
-          {recordingState === 'recording' && realtimeTranscript && (
-            <div
-              style={{
-                display: 'flex',
-                gap: '32px',
-                marginBottom: '32px',
-                alignItems: 'flex-start',
-                padding: '16px',
-                backgroundColor: isDarkMode ? 'rgba(74, 222, 128, 0.1)' : 'rgba(74, 222, 128, 0.15)',
-                border: `1px solid ${theme.accent}`,
-                borderRadius: '8px',
-              }}
-            >
-              <div style={{ flex: 1 }}>
-                <p style={{ fontSize: '16px', lineHeight: 1.7, marginBottom: '8px' }}>
-                  {realtimeTranscript}
-                  <span style={{
-                    display: 'inline-block',
-                    width: '2px',
-                    height: '1em',
-                    backgroundColor: theme.accent,
-                    marginLeft: '4px',
-                    animation: 'pulse 1s infinite',
-                    verticalAlign: 'text-bottom',
-                  }} />
-                </p>
-                <p style={{ fontSize: '14px', color: theme.accent }}>
-                  Listening...
-                </p>
-              </div>
+              )}
             </div>
-          )}
-          <div ref={listEndRef} />
-        </div>
-
-        {/* Loading indicator */}
-        {isGeneratingSVG && (
-          <div style={{ textAlign: 'center', color: theme.accent, padding: '20px' }}>
-            Generating visualization...
           </div>
-        )}
 
-        {/* Bottom Controls */}
-        <div style={{
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          gap: '24px',
-          padding: '24px 0',
-          marginTop: 'auto',
-          borderTop: `1px solid ${theme.border}`,
-        }}>
-          {/* Audio Recorder - ORIGINAL COMPONENT (key for working transcription) */}
-          <AudioRecorder
-            onTranscription={handleTranscription}
-            onSVGGenerated={handleSVGGenerated}
-            onChartGenerated={handleChartGenerated}
-            onError={handleError}
-            onRecordingStateChange={handleRecordingStateChange}
-            onRealtimeTranscript={handleRealtimeTranscript}
-          />
+          <footer className="slide-footer">
+            <button
+              type="button"
+              className="slide-nav-button"
+              disabled={!canGoPrev}
+              onClick={() => setActiveSlideIndex((prev) => Math.max(prev - 1, 0))}
+              aria-label="Previous slide"
+            >
+              &larr;
+            </button>
 
-          {/* Recording Status */}
-          {recordingState === 'recording' && (
-            <div style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: '8px',
-              fontSize: '14px',
-              color: theme.textSecondary,
-            }}>
-              <span style={{
-                width: '10px',
-                height: '10px',
-                borderRadius: '50%',
-                backgroundColor: visualizationActive ? theme.accent : '#f59e0b',
-                animation: 'pulse 2s infinite',
-              }} />
-              {visualizationActive ? `Visualizing - say "${deactivatePhrase}" to stop` : `Say "${triggerWord}" to visualize`}
+            <button
+              type="button"
+              className="slide-nav-button"
+              disabled={!canGoNext}
+              onClick={() => setActiveSlideIndex((prev) => Math.min(prev + 1, totalSlides - 1))}
+              aria-label="Next slide"
+            >
+              &rarr;
+            </button>
+          </footer>
+        </section>
+
+        <section className="board-controls">
+          <div className="control-start-text">
+            <p>Click To Start</p>
+            <p className="control-subtext">
+              {recordingState === 'idle' ? 'voice capture' : 'live transcription'}
+            </p>
+          </div>
+
+          <div className="control-recorder-wrap">
+            <AudioRecorder
+              onTranscription={handleTranscription}
+              onSVGGenerated={handleSVGGenerated}
+              onChartGenerated={handleChartGenerated}
+              onError={handleError}
+              onRecordingStateChange={handleRecordingStateChange}
+              onRealtimeTranscript={handleRealtimeTranscript}
+              onConnectionStateChange={setConnectionState}
+              compact
+            />
+          </div>
+
+          <div className="control-statuses">
+            <div className="control-status-row">
+              <span className={`status-dot ${connectionState === 'connected' ? 'is-active' : ''}`} />
+              <span>{connectionState === 'connected' ? 'connected' : 'disconnected'}</span>
             </div>
-          )}
-        </div>
-      </main>
 
-      <style>{`
-        @keyframes pulse {
-          0%, 100% { opacity: 1; }
-          50% { opacity: 0.5; }
-        }
-      `}</style>
+            <div className="control-status-row">
+              <span className={`status-dot ${visualizationActive ? 'is-active' : ''}`} />
+              <span className={`control-visualization-text ${visualizationActive ? 'is-alert' : ''}`}>
+                {visualizationActive
+                  ? `say "${deactivatePhrase}" to end visualization instructions`
+                  : `say "${triggerWord}" to visualize`}
+              </span>
+            </div>
+          </div>
+        </section>
+      </main>
     </div>
   );
 }
