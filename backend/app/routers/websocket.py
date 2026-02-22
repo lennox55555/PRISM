@@ -585,6 +585,55 @@ class AudioSessionHandler:
             logger.info("No text to visualize or not connected")
             return
 
+        # =========================================================================
+        # EMBEDDING-BASED TOPIC SIMILARITY (COMMENTED OUT)
+        # =========================================================================
+        # This code uses OpenAI text embeddings to determine if the current text
+        # is semantically similar to the previous visualization's text.
+        # If similar -> enhance the existing visualization
+        # If different -> create a new visualization (new topic)
+        #
+        # HOW IT WORKS:
+        # 1. Get embeddings for both texts using OpenAI's text-embedding-3-small
+        # 2. Calculate cosine similarity between the two embedding vectors
+        # 3. If similarity >= threshold (e.g., 0.75), topics are considered the same
+        #
+        # USAGE:
+        # -------------------------------------------------------------------------
+        # # Check if this text is similar to the previous visualization's text
+        # if self.last_visualization_text:
+        #     is_similar, similarity_score = await self.llm_processor.check_topic_similarity(
+        #         text1=self.last_visualization_text,
+        #         text2=current_text,
+        #         threshold=0.75  # Adjust threshold as needed (0.0 - 1.0)
+        #     )
+        #
+        #     logger.info(f"[SIMILARITY] Score: {similarity_score:.3f}, Similar: {is_similar}")
+        #
+        #     if is_similar:
+        #         # Same topic - enhance existing visualization
+        #         generation_mode = "enhanced"
+        #         await self._generate_enhanced_svg(
+        #             previous_text=self.last_visualization_text,
+        #             new_text=current_text,
+        #             previous_svg=self.last_svg_code
+        #         )
+        #     else:
+        #         # Different topic - create new visualization
+        #         generation_mode = "new_topic"
+        #         await self._generate_and_send_svg(current_text)
+        # else:
+        #     # First visualization - no comparison needed
+        #     generation_mode = "initial"
+        #     await self._generate_and_send_svg(current_text)
+        #
+        # # Store for next comparison
+        # self.last_visualization_text = current_text
+        # self.last_similarity_score = similarity_score if self.last_visualization_text else None
+        # -------------------------------------------------------------------------
+        # END EMBEDDING-BASED SIMILARITY
+        # =========================================================================
+
         try:
             logger.info(f"[VIZ] Generating visualization for: '{current_text[:100]}...'")
 
