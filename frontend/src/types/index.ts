@@ -55,7 +55,7 @@ export interface ChartGenerationResponse {
   originalText: string;
   newTextDelta?: string;
   error?: string;
-  generationMode: 'chart';
+  generationMode: 'chart' | 'enhanced';
   chartConfidence?: number;
 }
 

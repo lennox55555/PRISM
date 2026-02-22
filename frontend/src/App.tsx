@@ -6,13 +6,24 @@
 
 import { useState, useCallback, useRef, useEffect } from 'react';
 import { AudioRecorder } from './components/AudioRecorder';
-import { SVGRenderer } from './components/SVGRenderer';
 import {
   TranscriptionResult,
   SVGGenerationResponse,
   ChartGenerationResponse,
   RecordingState,
 } from './types';
+
+// interface for a single version of a visualization
+interface VisualizationVersion {
+  svg?: string;
+  chartImage?: string;
+  chartCode?: string;
+  description?: string;
+  newTextDelta: string;
+  timestamp: Date;
+  generationMode?: 'initial' | 'enhanced' | 'new_topic' | 'chart' | 'text';
+  similarityScore?: number | null;
+}
 
 // interface for storing notes history (text-only, svg, or chart)
 interface NoteHistoryItem {
@@ -29,6 +40,9 @@ interface NoteHistoryItem {
   generationMode?: 'initial' | 'enhanced' | 'new_topic' | 'chart' | 'text';
   similarityScore?: number | null;
   similarityThreshold?: number;
+  // version history for enhanced visualizations
+  versions?: VisualizationVersion[];
+  currentVersionIndex?: number;
 }
 
 // interface for a session
@@ -78,11 +92,15 @@ function App() {
     notesHistoryRef.current = notesHistory;
   }, [notesHistory]);
 
-  // auto-scroll to latest note
+  // track previous notes count to detect new items vs updates
+  const prevNotesCountRef = useRef(0);
+
+  // auto-scroll to latest note only when NEW items are added (not on version changes)
   useEffect(() => {
-    if (listEndRef.current) {
+    if (listEndRef.current && notesHistory.length > prevNotesCountRef.current) {
       listEndRef.current.scrollIntoView({ behavior: 'smooth' });
     }
+    prevNotesCountRef.current = notesHistory.length;
   }, [notesHistory]);
 
   // create text-only notes periodically when recording but visualization is off
@@ -203,32 +221,100 @@ function App() {
 
   const handleSVGGenerated = useCallback((response: SVGGenerationResponse) => {
     if (response.svg && !response.error) {
-      const newItem: NoteHistoryItem = {
-        id: idCounterRef.current++,
-        type: 'svg',
+      const newVersion: VisualizationVersion = {
         svg: response.svg,
         description: response.description,
-        originalText: response.originalText,
         newTextDelta: response.newTextDelta || response.originalText,
         timestamp: new Date(),
         generationMode: response.generationMode,
         similarityScore: response.similarityScore,
-        similarityThreshold: response.similarityThreshold,
       };
 
       // update captured text length to prevent duplicate text-only notes
       lastCapturedTextLengthRef.current = transcriptionTextRef.current.length;
 
       if (response.generationMode === 'enhanced') {
+        // add to existing visualization's version history
         setNotesHistory((prev) => {
-          if (prev.length === 0) return [newItem];
+          if (prev.length === 0) {
+            // no previous items, create new with version history
+            return [{
+              id: idCounterRef.current++,
+              type: 'svg',
+              svg: response.svg,
+              description: response.description,
+              originalText: response.originalText,
+              newTextDelta: response.newTextDelta || response.originalText,
+              timestamp: new Date(),
+              generationMode: response.generationMode,
+              similarityScore: response.similarityScore,
+              similarityThreshold: response.similarityThreshold,
+              versions: [newVersion],
+              currentVersionIndex: 0,
+            }];
+          }
+
           const lastSvgIndex = prev.map(item => item.type).lastIndexOf('svg');
-          if (lastSvgIndex === -1) return [...prev, newItem];
+          if (lastSvgIndex === -1) {
+            // no previous SVG, create new
+            return [...prev, {
+              id: idCounterRef.current++,
+              type: 'svg' as const,
+              svg: response.svg,
+              description: response.description,
+              originalText: response.originalText,
+              newTextDelta: response.newTextDelta || response.originalText,
+              timestamp: new Date(),
+              generationMode: response.generationMode,
+              similarityScore: response.similarityScore,
+              similarityThreshold: response.similarityThreshold,
+              versions: [newVersion],
+              currentVersionIndex: 0,
+            }];
+          }
+
+          // add new version to existing SVG item
           const updated = [...prev];
-          updated[lastSvgIndex] = { ...newItem, id: prev[lastSvgIndex].id };
+          const existingItem = updated[lastSvgIndex];
+          const existingVersions = existingItem.versions || [{
+            svg: existingItem.svg,
+            description: existingItem.description,
+            newTextDelta: existingItem.newTextDelta,
+            timestamp: existingItem.timestamp,
+            generationMode: existingItem.generationMode,
+            similarityScore: existingItem.similarityScore,
+          }];
+
+          const newVersions = [...existingVersions, newVersion];
+          updated[lastSvgIndex] = {
+            ...existingItem,
+            svg: response.svg,
+            description: response.description,
+            newTextDelta: response.newTextDelta || response.originalText,
+            generationMode: response.generationMode,
+            similarityScore: response.similarityScore,
+            similarityThreshold: response.similarityThreshold,
+            versions: newVersions,
+            currentVersionIndex: newVersions.length - 1, // show latest by default
+          };
           return updated;
         });
       } else {
+        // new topic or initial - create new item with version history
+        const newItem: NoteHistoryItem = {
+          id: idCounterRef.current++,
+          type: 'svg',
+          svg: response.svg,
+          description: response.description,
+          originalText: response.originalText,
+          newTextDelta: response.newTextDelta || response.originalText,
+          timestamp: new Date(),
+          generationMode: response.generationMode,
+          similarityScore: response.similarityScore,
+          similarityThreshold: response.similarityThreshold,
+          versions: [newVersion],
+          currentVersionIndex: 0,
+        };
         setNotesHistory((prev) => [...prev, newItem]);
       }
     }
@@ -240,26 +326,144 @@ function App() {
 
   const handleChartGenerated = useCallback((response: ChartGenerationResponse) => {
     if (response.image && !response.error) {
-      const newItem: NoteHistoryItem = {
-        id: idCounterRef.current++,
-        type: 'chart',
+      const newVersion: VisualizationVersion = {
         chartImage: response.image,
         chartCode: response.code,
-        chartConfidence: response.chartConfidence,
         description: response.description,
-        originalText: response.originalText,
         newTextDelta: response.newTextDelta || response.originalText,
         timestamp: new Date(),
-        generationMode: 'chart',
+        generationMode: response.generationMode,
       };
+
       // update captured text length to prevent duplicate text-only notes
       lastCapturedTextLengthRef.current = transcriptionTextRef.current.length;
-      setNotesHistory((prev) => [...prev, newItem]);
+
+      if (response.generationMode === 'enhanced') {
+        // add to existing chart's version history
+        setNotesHistory((prev) => {
+          if (prev.length === 0) {
+            // no previous items, create new with version history
+            return [{
+              id: idCounterRef.current++,
+              type: 'chart',
+              chartImage: response.image,
+              chartCode: response.code,
+              chartConfidence: response.chartConfidence,
+              description: response.description,
+              originalText: response.originalText,
+              newTextDelta: response.newTextDelta || response.originalText,
+              timestamp: new Date(),
+              generationMode: response.generationMode,
+              versions: [newVersion],
+              currentVersionIndex: 0,
+            }];
+          }
+
+          const lastChartIndex = prev.map(item => item.type).lastIndexOf('chart');
+          if (lastChartIndex === -1) {
+            // no previous chart, create new
+            return [...prev, {
+              id: idCounterRef.current++,
+              type: 'chart' as const,
+              chartImage: response.image,
+              chartCode: response.code,
+              chartConfidence: response.chartConfidence,
+              description: response.description,
+              originalText: response.originalText,
+              newTextDelta: response.newTextDelta || response.originalText,
+              timestamp: new Date(),
+              generationMode: response.generationMode,
+              versions: [newVersion],
+              currentVersionIndex: 0,
+            }];
+          }
+
+          // add new version to existing chart item
+          const updated = [...prev];
+          const existingItem = updated[lastChartIndex];
+          const existingVersions = existingItem.versions || [{
+            chartImage: existingItem.chartImage,
+            chartCode: existingItem.chartCode,
+            description: existingItem.description,
+            newTextDelta: existingItem.newTextDelta,
+            timestamp: existingItem.timestamp,
+            generationMode: existingItem.generationMode,
+          }];
+
+          const newVersions = [...existingVersions, newVersion];
+          updated[lastChartIndex] = {
+            ...existingItem,
+            chartImage: response.image,
+            chartCode: response.code,
+            description: response.description,
+            newTextDelta: response.newTextDelta || response.originalText,
+            generationMode: response.generationMode,
+            versions: newVersions,
+            currentVersionIndex: newVersions.length - 1, // show latest by default
+          };
+          return updated;
+        });
+      } else {
+        // initial chart - create new item with version history
+        const newItem: NoteHistoryItem = {
+          id: idCounterRef.current++,
+          type: 'chart',
+          chartImage: response.image,
+          chartCode: response.code,
+          chartConfidence: response.chartConfidence,
+          description: response.description,
+          originalText: response.originalText,
+          newTextDelta: response.newTextDelta || response.originalText,
+          timestamp: new Date(),
+          generationMode: 'chart',
+          versions: [newVersion],
+          currentVersionIndex: 0,
+        };
+        setNotesHistory((prev) => [...prev, newItem]);
+      }
     }
     setIsGeneratingSVG(false);
     if (response.error) {
       setError(response.error);
     }
+  }, []);
+
+  // navigate between visualization versions (works for both SVGs and charts)
+  const handleVersionChange = useCallback((itemId: number, direction: 'prev' | 'next') => {
+    setNotesHistory((prev) => {
+      return prev.map((item) => {
+        if (item.id !== itemId || !item.versions || item.versions.length <= 1) {
+          return item;
+        }
+
+        const currentIndex = item.currentVersionIndex ?? item.versions.length - 1;
+        let newIndex: number;
+
+        if (direction === 'prev') {
+          newIndex = Math.max(0, currentIndex - 1);
+        } else {
+          newIndex = Math.min(item.versions.length - 1, currentIndex + 1);
+        }
+
+        if (newIndex === currentIndex) return item;
+
+        const version = item.versions[newIndex];
+        return {
+          ...item,
+          // SVG properties
+          svg: version.svg,
+          // Chart properties
+          chartImage: version.chartImage,
+          chartCode: version.chartCode,
+          // Common properties
+          description: version.description,
+          newTextDelta: version.newTextDelta,
+          generationMode: version.generationMode,
+          similarityScore: version.similarityScore,
+          currentVersionIndex: newIndex,
+        };
+      });
+    });
   }, []);
 
   const handleError = useCallback((errorMessage: string) => {
@@ -501,6 +705,62 @@ function App() {
                         dangerouslySetInnerHTML={{ __html: item.svg }}
                       />
                     ) : null}
+
+                    {/* Version navigation arrows - show for SVGs and charts with multiple versions */}
+                    {(item.type === 'svg' || item.type === 'chart') && item.versions && item.versions.length > 1 && (
+                      <div style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        gap: '16px',
+                        marginTop: '8px',
+                        padding: '8px',
+                      }}>
+                        <button
+                          onClick={() => handleVersionChange(item.id, 'prev')}
+                          disabled={(item.currentVersionIndex ?? item.versions!.length - 1) === 0}
+                          style={{
+                            background: 'none',
+                            border: 'none',
+                            cursor: (item.currentVersionIndex ?? item.versions!.length - 1) === 0 ? 'not-allowed' : 'pointer',
+                            opacity: (item.currentVersionIndex ?? item.versions!.length - 1) === 0 ? 0.3 : 1,
+                            padding: '4px 8px',
+                            color: theme.text,
+                            display: 'flex',
+                            alignItems: 'center',
+                          }}
+                          title="Previous version"
+                        >
+                          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                            <path d="M15 18l-6-6 6-6" />
+                          </svg>
+                        </button>
+
+                        <span style={{ fontSize: '12px', color: theme.textSecondary }}>
+                          {(item.currentVersionIndex ?? item.versions!.length - 1) + 1} / {item.versions!.length}
+                        </span>
+
+                        <button
+                          onClick={() => handleVersionChange(item.id, 'next')}
+                          disabled={(item.currentVersionIndex ?? item.versions!.length - 1) === item.versions!.length - 1}
+                          style={{
+                            background: 'none',
+                            border: 'none',
+                            cursor: (item.currentVersionIndex ?? item.versions!.length - 1) === item.versions!.length - 1 ? 'not-allowed' : 'pointer',
+                            opacity: (item.currentVersionIndex ?? item.versions!.length - 1) === item.versions!.length - 1 ? 0.3 : 1,
+                            padding: '4px 8px',
+                            color: theme.text,
+                            display: 'flex',
+                            alignItems: 'center',
+                          }}
+                          title="Next version"
+                        >
+                          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                            <path d="M9 18l6-6-6-6" />
+                          </svg>
+                        </button>
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
