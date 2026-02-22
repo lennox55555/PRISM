@@ -397,6 +397,46 @@ body {
   cursor: pointer;
 }
 
+.board-theme-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.theme-toggle-icon {
+  width: 16px;
+  height: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.theme-toggle-icon svg {
+  width: 16px;
+  height: 16px;
+}
+
+.board-footer-link-with-icon {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.board-footer-icon {
+  width: 16px;
+  height: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.board-footer-icon svg {
+  width: 16px;
+  height: 16px;
+}
+
 /* Export dropdown styles */
 .export-dropdown {
   position: relative;

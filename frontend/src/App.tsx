@@ -303,6 +303,7 @@ function App() {
   const [activeSlideIndex, setActiveSlideIndex] = useState(0);
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
   const [lastSavedTime, setLastSavedTime] = useState<Date | null>(null);
+  const [isDarkModeLabel, setIsDarkModeLabel] = useState(false);
 
   const idCounterRef = useRef(0);
   const lastCapturedTextLengthRef = useRef(0);
@@ -1895,8 +1896,33 @@ function App() {
                 <PrismLogo />
                 <p className="board-brand">PRISM</p>
               </div>
-              <button type="button" className="board-footer-link">Settings</button>
-              <button type="button" className="board-footer-link">Updates & FAQ</button>
+              <button
+                type="button"
+                className="board-footer-link board-theme-toggle"
+                onClick={() => setIsDarkModeLabel((prev) => !prev)}
+              >
+                <span className="theme-toggle-icon" aria-hidden="true">
+                  {isDarkModeLabel ? (
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <path d="M21 12.79A9 9 0 1111.21 3a7 7 0 009.79 9.79z" />
+                    </svg>
+                  ) : (
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <circle cx="12" cy="12" r="4" />
+                      <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41" />
+                    </svg>
+                  )}
+                </span>
+                <span>{isDarkModeLabel ? 'Dark Mode' : 'Light Mode'}</span>
+              </button>
+              <button type="button" className="board-footer-link board-footer-link-with-icon">
+                <span className="board-footer-icon" aria-hidden="true">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <path d="M5 12h14M13 6l6 6-6 6" />
+                  </svg>
+                </span>
+                <span>Updates & FAQ</span>
+              </button>
             </>
           )}
           {isSidebarCollapsed && (
