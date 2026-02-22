@@ -673,9 +673,9 @@ body {
 
 .slide-text {
   font-size: 1.02rem;
-  line-height: 1.55;
+  line-height: 1.65;
   color: #141414;
-  white-space: pre-wrap;
+  white-space: normal;
   overflow-wrap: anywhere;
 }
 

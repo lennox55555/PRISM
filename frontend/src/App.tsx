@@ -81,25 +81,6 @@ function isRenderableSvg(svgCode?: string): boolean {
   return /^<svg[\s>]/i.test(trimmed) && /<\/svg>\s*$/i.test(trimmed);
 }
 
-function getSlideItemLabel(item: SlideRenderItem): string {
-  if (item.type === 'live') {
-    return 'Listening...';
-  }
-  if (item.type === 'text') {
-    return item.isContinuation ? 'Note continued' : 'Note';
-  }
-  if (item.type === 'chart') {
-    return item.isContinuation ? 'Chart note continued' : 'Chart generated';
-  }
-  if (item.generationMode === 'enhanced') {
-    return item.isContinuation ? 'Enhanced visualization continued' : 'Enhanced visualization';
-  }
-  if (item.generationMode === 'new_topic') {
-    return item.isContinuation ? 'New topic continued' : 'New topic detected';
-  }
-  return item.isContinuation ? 'Visualization continued' : 'Visualization generated';
-}
-
 function getSessionShortLabel(name: string): string {
   const trimmed = name.trim();
   const initials = trimmed
@@ -1975,26 +1956,19 @@ function App() {
           <div className="slide-content">
             <div className="slide-text-column">
               {activeSlide && activeSlide.items.length > 0 ? (
-                activeSlide.items.map((item) => (
-                  <article
-                    key={item.key}
-                    className={`slide-text-item ${item.type === 'live' ? 'is-live' : ''}`}
-                  >
-                    <p className="slide-text">
-                      {item.text}
-                      {item.type === 'live' && recordingState === 'recording' && (
-                        <span className="slide-caret" />
-                      )}
-                    </p>
-
-                    <div className="slide-meta-row">
-                      <span>{getSlideItemLabel(item)}</span>
-                      {item.similarityScore != null && (
-                        <span>Similarity {(item.similarityScore * 100).toFixed(0)}%</span>
-                      )}
-                    </div>
-                  </article>
-                ))
+                <article className={`slide-text-item ${activeSlide.items.some(i => i.type === 'live') ? 'is-live' : ''}`}>
+                  <p className="slide-text">
+                    {activeSlide.items.map((item, idx) => (
+                      <span key={item.key}>
+                        {idx > 0 && ' '}
+                        {item.text}
+                        {item.type === 'live' && recordingState === 'recording' && (
+                          <span className="slide-caret" />
+                        )}
+                      </span>
+                    ))}
+                  </p>
+                </article>
               ) : (
                 <div className="slide-empty">Notes will appear here as soon as recording starts.</div>
               )}
