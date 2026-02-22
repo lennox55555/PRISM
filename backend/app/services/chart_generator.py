@@ -122,20 +122,33 @@ class ChartGenerator:
     """
 
     def __init__(self):
-        """initialize the chart generator with openai client."""
+        """initialize the chart generator with llm client."""
         self.client = None
         self.model = settings.llm_model
         self._initialize_client()
 
+    def _is_claude_model(self) -> bool:
+        """check if the model is a claude model."""
+        return self.model.startswith("claude")
+
     def _initialize_client(self):
-        """initialize the openai client for code generation."""
-        try:
-            from openai import AsyncOpenAI
-            self.client = AsyncOpenAI(api_key=settings.openai_api_key)
-            logger.info("chart generator initialized")
-        except ImportError:
-            logger.warning("openai package not installed, chart generator unavailable")
-            self.client = None
+        """initialize the llm client for code generation."""
+        if self._is_claude_model():
+            try:
+                import anthropic
+                self.client = anthropic.AsyncAnthropic(api_key=settings.claude_key)
+                logger.info(f"chart generator initialized with claude model: {self.model}")
+            except ImportError:
+                logger.warning("anthropic package not installed, chart generator unavailable")
+                self.client = None
+        else:
+            try:
+                from openai import AsyncOpenAI
+                self.client = AsyncOpenAI(api_key=settings.openai_api_key)
+                logger.info("chart generator initialized with openai")
+            except ImportError:
+                logger.warning("openai package not installed, chart generator unavailable")
+                self.client = None
 
     async def is_chart_request(self, text: str) -> Tuple[bool, float]:
         """
@@ -214,17 +227,30 @@ class ChartGenerator:
             return self._create_fallback_code(text)
 
         try:
-            response = await self.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": MATPLOTLIB_SYSTEM_PROMPT},
-                    {"role": "user", "content": f"create a chart visualization for: {text}"},
-                ],
-                temperature=0.7,
-                max_tokens=2000,
-            )
+            if self._is_claude_model():
+                # use anthropic api for claude models
+                response = await self.client.messages.create(
+                    model=self.model,
+                    max_tokens=2000,
+                    system=MATPLOTLIB_SYSTEM_PROMPT,
+                    messages=[
+                        {"role": "user", "content": f"create a chart visualization for: {text}"},
+                    ],
+                )
+                code = self._extract_python_code(response.content[0].text)
+            else:
+                # use openai api for other models
+                response = await self.client.chat.completions.create(
+                    model=self.model,
+                    messages=[
+                        {"role": "system", "content": MATPLOTLIB_SYSTEM_PROMPT},
+                        {"role": "user", "content": f"create a chart visualization for: {text}"},
+                    ],
+                    temperature=0.7,
+                    max_tokens=2000,
+                )
+                code = self._extract_python_code(response.choices[0].message.content)
 
-            code = self._extract_python_code(response.choices[0].message.content)
             logger.info(f"generated matplotlib code ({len(code)} chars)")
             return code
 
