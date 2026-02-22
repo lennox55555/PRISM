@@ -111,7 +111,30 @@ function getSessionShortLabel(name: string): string {
   return name.charAt(0).toUpperCase();
 }
 
+const THEME_STORAGE_KEY = 'board-ui-theme';
+
+const PrismLogo = () => (
+  <svg className="board-logo" viewBox="0 0 120 72" aria-hidden="true">
+    <path
+      d="M52 12L14 60h76L52 12z"
+      fill="none"
+      stroke="#f0f0f0"
+      strokeWidth="8"
+      strokeLinejoin="round"
+    />
+    <path d="M4 42L92 58 84 72 0 48z" fill="#3ad54f" />
+    <path d="M30 36L102 52 84 72 20 50z" fill="#8ced63" />
+  </svg>
+);
+
 function App() {
+  const [isLightMode, setIsLightMode] = useState(() => {
+    if (typeof window === 'undefined') {
+      return false;
+    }
+    return window.localStorage.getItem(THEME_STORAGE_KEY) === 'light';
+  });
+
   const [sessions, setSessions] = useState<Session[]>([
     { id: 1, name: 'Session 1', notes: [], transcriptionText: '' },
   ]);
@@ -145,6 +168,12 @@ function App() {
   useEffect(() => {
     notesHistoryRef.current = notesHistory;
   }, [notesHistory]);
+
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      window.localStorage.setItem(THEME_STORAGE_KEY, isLightMode ? 'light' : 'dark');
+    }
+  }, [isLightMode]);
 
   useEffect(() => {
     if (recordingState !== 'recording') {
@@ -517,7 +546,7 @@ function App() {
   const slideMode = 'notes';
 
   return (
-    <div className="board-layout">
+    <div className={`board-layout ${isLightMode ? 'is-light' : ''}`}>
       <aside className={`board-sidebar ${isSidebarCollapsed ? 'is-collapsed' : ''}`}>
         <button
           type="button"
@@ -560,9 +589,24 @@ function App() {
         <div className="board-sidebar-footer">
           {!isSidebarCollapsed && (
             <>
-              <p className="board-brand">PRISM</p>
-              <button type="button" className="board-footer-link">Settings</button>
-              <button type="button" className="board-footer-link">Updates & FAQ</button>
+              <div className="board-brand-row">
+                <PrismLogo />
+                <p className="board-brand">PRISM</p>
+              </div>
+              <button
+                type="button"
+                className="board-footer-link"
+                onClick={() => setIsLightMode((prev) => !prev)}
+              >
+                <span className="board-footer-icon" aria-hidden="true">
+                  {isLightMode ? '☾' : '☀'}
+                </span>
+                <span>{isLightMode ? 'Dark Mode' : 'Light Mode'}</span>
+              </button>
+              <button type="button" className="board-footer-link">
+                <span className="board-footer-icon" aria-hidden="true">↗</span>
+                <span>Updates & FAQ</span>
+              </button>
             </>
           )}
         </div>
