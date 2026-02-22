@@ -263,10 +263,10 @@ body {
   width: 22px;
   height: 44px;
   border-radius: 0 6px 6px 0;
-  border: 1px solid #404040;
+  border: 1px solid #3ad54f;
   border-left: none;
-  background: #2a2a2a;
-  color: #888888;
+  background: #1a2e1a;
+  color: #3ad54f;
   cursor: pointer;
   font-size: 14px;
   line-height: 1;
@@ -277,8 +277,9 @@ body {
 }
 
 .sidebar-toggle:hover {
-  background: #363636;
-  color: #ffffff;
+  background: #2a4a2a;
+  color: #8ced63;
+  border-color: #8ced63;
 }
 
 .sidebar-toggle:focus-visible {
@@ -561,6 +562,8 @@ body {
   width: 36px;
   height: 36px;
   flex-shrink: 0;
+  object-fit: contain;
+  border-radius: var(--radius-sm);
 }
 
 .board-brand {
@@ -1095,6 +1098,28 @@ body {
   line-height: 1.5;
   padding: 20px;
   max-width: 240px;
+}
+
+.loading-animation-container {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+}
+
+.loading-animation {
+  width: 80px;
+  height: 80px;
+  object-fit: contain;
+}
+
+.loading-text {
+  color: var(--color-primary);
+  font-size: 0.9rem;
+  font-weight: 500;
+  margin: 0;
+  animation: pulse 1.5s ease-in-out infinite;
 }
 
 /* Version navigation for visualizations with history */

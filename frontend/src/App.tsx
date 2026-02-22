@@ -194,21 +194,6 @@ function getNextSessionId(sessions: Session[]): number {
   return getLowestUnusedPositiveNumber(sessions.map((s) => s.id));
 }
 
-// PRISM Logo component
-const PrismLogo = () => (
-  <svg className="board-logo" viewBox="0 0 120 72" aria-hidden="true">
-    <path
-      d="M52 12L14 60h76L52 12z"
-      fill="none"
-      stroke="#f0f0f0"
-      strokeWidth="8"
-      strokeLinejoin="round"
-    />
-    <path d="M4 42L92 58 84 72 0 48z" fill="#3ad54f" />
-    <path d="M30 36L102 52 84 72 20 50z" fill="#8ced63" />
-  </svg>
-);
-
 function escapeHtml(value: string): string {
   return value
     .replace(/&/g, '&amp;')
@@ -710,43 +695,6 @@ function App() {
       return filtered;
     });
   }, [activeSessionId]);
-
-  // Clear all local storage data and reset to fresh state
-  const handleClearAllData = useCallback(() => {
-    if (!window.confirm('Are you sure you want to clear ALL data? This cannot be undone.')) {
-      return;
-    }
-
-    // Clear localStorage
-    localStorage.removeItem(STORAGE_KEY);
-
-    // Reset to fresh state
-    const freshSession: Session = {
-      id: 1,
-      name: 'Session 1',
-      notes: [],
-      transcriptionText: '',
-    };
-
-    setSessions([freshSession]);
-    setActiveSessionId(1);
-    setNotesHistory([]);
-    setTranscriptionText('');
-    setRealtimeTranscript('');
-    hasRealtimeTranscriptRef.current = false;
-    setLiveSummary('');
-    setSummaryStatus('idle');
-    setSummaryError(null);
-    setSummaryDebug(null);
-    setActiveSlideIndex(0);
-    setHasUnsavedChanges(false);
-    lastSummarySourceKeyRef.current = '';
-    lastSummarizedLengthRef.current = 0;
-    lastCapturedTextLengthRef.current = 0;
-    idCounterRef.current = 1;
-
-    console.log('All data cleared from localStorage');
-  }, []);
 
   const handleRenameSession = useCallback((sessionId: number) => {
     const target = sessions.find((s) => s.id === sessionId);
@@ -2179,27 +2127,6 @@ function App() {
           {!isSidebarCollapsed && <span>New Board</span>}
         </button>
 
-        {!isSidebarCollapsed && (
-          <button
-            type="button"
-            className="board-clear-all"
-            onClick={handleClearAllData}
-            style={{
-              padding: '8px 12px',
-              marginTop: '8px',
-              background: 'transparent',
-              border: '1px solid rgba(239, 68, 68, 0.3)',
-              borderRadius: '6px',
-              color: '#ef4444',
-              cursor: 'pointer',
-              fontSize: '12px',
-              width: '100%',
-            }}
-          >
-            Clear All Data
-          </button>
-        )}
-
         {false && !isSidebarCollapsed && (
           <details className="export-dropdown sidebar-export-dropdown">
             <summary className={`board-footer-link ${!canShowExport ? 'disabled' : ''}`}>
@@ -2412,14 +2339,14 @@ function App() {
                 )}
               </div>
               <div className="board-brand-row">
-                <PrismLogo />
+                <img src="/logo.png" className="board-logo" alt="PRISM" />
                 <p className="board-brand">PRISM</p>
               </div>
             </>
           )}
           {isSidebarCollapsed && (
             <div className="board-brand-row">
-              <PrismLogo />
+              <img src="/logo.png" className="board-logo" alt="PRISM" />
             </div>
           )}
         </div>
@@ -2559,9 +2486,20 @@ function App() {
                 />
               ) : (
                 <div className="slide-visual-placeholder">
-                  {isGeneratingSVG
-                    ? 'Generating visualization...'
-                    : 'Visual output for this slide appears here.'}
+                  {(recordingState === 'recording' || isGeneratingSVG) && isOnLatestSlide ? (
+                    <div className="loading-animation-container">
+                      <img
+                        src="/loading_animation.gif"
+                        alt="Processing audio..."
+                        className="loading-animation"
+                      />
+                      <p className="loading-text">
+                        {isGeneratingSVG ? 'Generating visualization...' : 'Listening...'}
+                      </p>
+                    </div>
+                  ) : (
+                    'Visual output for this slide appears here.'
+                  )}
                 </div>
               )}
 
