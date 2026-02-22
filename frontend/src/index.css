@@ -733,6 +733,14 @@ body {
   font-size: 0.8rem;
   color: #777777;
   flex: 1;
+  min-width: 0;
+}
+
+.save-status-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
 }
 
 .save-button {
@@ -759,6 +767,33 @@ body {
 
 .save-button:active {
   background: #333333;
+}
+
+.board-clear-all {
+  padding: 4px 10px;
+  border-radius: 4px;
+  border: 1px solid rgba(239, 68, 68, 0.35);
+  background: transparent;
+  color: #ef4444;
+  font-size: 0.72rem;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.15s ease;
+}
+
+.board-clear-all:hover {
+  background: rgba(239, 68, 68, 0.12);
+  border-color: rgba(239, 68, 68, 0.5);
+}
+
+.board-clear-all:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(239, 68, 68, 0.45);
+}
+
+.board-clear-all:active {
+  background: rgba(239, 68, 68, 0.18);
 }
 
 .board-main {

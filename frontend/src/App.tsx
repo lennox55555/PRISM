@@ -2179,27 +2179,6 @@ function App() {
           {!isSidebarCollapsed && <span>New Board</span>}
         </button>
 
-        {!isSidebarCollapsed && (
-          <button
-            type="button"
-            className="board-clear-all"
-            onClick={handleClearAllData}
-            style={{
-              padding: '8px 12px',
-              marginTop: '8px',
-              background: 'transparent',
-              border: '1px solid rgba(239, 68, 68, 0.3)',
-              borderRadius: '6px',
-              color: '#ef4444',
-              cursor: 'pointer',
-              fontSize: '12px',
-              width: '100%',
-            }}
-          >
-            Clear All Data
-          </button>
-        )}
-
         {false && !isSidebarCollapsed && (
           <details className="export-dropdown sidebar-export-dropdown">
             <summary className={`board-footer-link ${!canShowExport ? 'disabled' : ''}`}>
@@ -2400,16 +2379,25 @@ function App() {
                     ? `Saved ${lastSavedTime.toLocaleTimeString()}`
                     : 'Saved'}
                 </span>
-                {hasUnsavedChanges && (
+                <div className="save-status-actions">
+                  {hasUnsavedChanges && (
+                    <button
+                      type="button"
+                      className="save-button"
+                      onClick={saveToLocalStorage}
+                      title="Save (Ctrl+S / Cmd+S)"
+                    >
+                      Save
+                    </button>
+                  )}
                   <button
                     type="button"
-                    className="save-button"
-                    onClick={saveToLocalStorage}
-                    title="Save (Ctrl+S / Cmd+S)"
+                    className="board-clear-all"
+                    onClick={handleClearAllData}
                   >
-                    Save
+                    Clear All Data
                   </button>
-                )}
+                </div>
               </div>
               <div className="board-brand-row">
                 <PrismLogo />
