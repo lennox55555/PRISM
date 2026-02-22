@@ -1571,8 +1571,10 @@ function App() {
   }, [notesHistory, realtimeTranscript, recordingState]);
 
   const slidePages = useMemo<SlidePage[]>(() => {
-    // Create one slide per visualization/note item - no text-based splitting
-    const items: SlideRenderItem[] = slideSources.map((source) => {
+    // Create one slide per item - each visualization gets its own page
+    const pages: SlidePage[] = [];
+
+    slideSources.forEach((source, index) => {
       const hasVisual = source.type === 'chart'
         || (source.type === 'svg' && isRenderableSvg(source.svg));
       let text = source.newTextDelta.trim();
@@ -1585,7 +1587,7 @@ function App() {
           : 'Note captured.';
       }
 
-      return {
+      const item: SlideRenderItem = {
         ...source,
         key: `${source.id}-0`,
         text,
@@ -1593,13 +1595,20 @@ function App() {
         chartImage: source.chartImage,
         isContinuation: false,
       };
+
+      // Each item gets its own page/slide
+      pages.push({
+        id: index + 1,
+        items: [item],
+      });
     });
 
-    // Put all items on a single page
-    return [{
-      id: 1,
-      items,
-    }];
+    // Always have at least one empty page
+    if (pages.length === 0) {
+      pages.push({ id: 1, items: [] });
+    }
+
+    return pages;
   }, [slideSources]);
 
   const totalSlides = slidePages.length;
