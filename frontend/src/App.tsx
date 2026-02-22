@@ -2070,7 +2070,7 @@ function App() {
         </section>
 
         <section className="board-controls">
-          <div className="control-start-text">
+          <div className="control-start-text control-start-placeholder" aria-hidden="true">
             <p>Click To Start</p>
             <p className="control-subtext">
               {recordingState === 'idle' ? 'voice capture' : 'live transcription'}
