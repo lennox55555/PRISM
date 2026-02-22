@@ -715,7 +715,10 @@ function App() {
                 className="board-footer-link"
                 onClick={() => setIsLightMode((prev) => !prev)}
               >
-                <span className="board-footer-icon" aria-hidden="true">
+                <span
+                  className={`board-footer-icon ${isLightMode ? '' : 'is-sun'}`}
+                  aria-hidden="true"
+                >
                   {isLightMode ? '☾' : '☀'}
                 </span>
                 <span>{isLightMode ? 'Dark Mode' : 'Light Mode'}</span>
