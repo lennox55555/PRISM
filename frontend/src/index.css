@@ -263,23 +263,23 @@ body {
   width: 22px;
   height: 44px;
   border-radius: 0 6px 6px 0;
-  border: 1px solid #3ad54f;
+  border: 1px solid #404040;
   border-left: none;
-  background: #1a2e1a;
-  color: #3ad54f;
+  background: #1e1e1e;
+  color: #9a9a9a;
   cursor: pointer;
   font-size: 14px;
   line-height: 1;
   display: flex;
   align-items: center;
   justify-content: center;
-  transition: all 0.2s ease;
+  transition: background 0.2s ease, color 0.2s ease, border-color 0.2s ease, transform 0.2s ease, box-shadow 0.2s ease;
 }
 
 .sidebar-toggle:hover {
-  background: #2a4a2a;
-  color: #8ced63;
-  border-color: #8ced63;
+  background: linear-gradient(90deg, #1e1e1e 0%, #2b2b2b 34%, #363636 52%, #3a3a3a 100%);
+  color: #ffffff;
+  border-color: #4b4b4b;
 }
 
 .sidebar-toggle:focus-visible {
@@ -311,7 +311,7 @@ body {
   width: 100%;
   min-height: 44px;
   border-radius: 8px;
-  border: 1px solid #484848;
+  border: 1px solid #80d57c;
   background: #363636;
   color: #ffffff;
   font-size: 0.9rem;
@@ -324,16 +324,18 @@ body {
   cursor: pointer;
   margin-bottom: 16px;
   transition: all 0.15s ease;
+  box-shadow: 0 0 8px rgba(128, 213, 124, 0.12);
 }
 
 .board-new-session:hover {
   background: #404040;
-  border-color: #555555;
+  border-color: #98e594;
+  box-shadow: 0 0 10px rgba(152, 229, 148, 0.2);
 }
 
 .board-new-session:focus-visible {
   outline: none;
-  box-shadow: 0 0 0 2px #ffffff;
+  box-shadow: 0 0 0 2px #80d57c;
 }
 
 .board-new-session:active {
@@ -343,7 +345,7 @@ body {
 .new-session-plus {
   font-size: 1.2rem;
   font-weight: 400;
-  color: #888888;
+  color: #80d57c;
 }
 
 .board-sidebar.is-collapsed .board-new-session {
@@ -543,7 +545,6 @@ body {
 .board-sidebar-footer {
   margin-top: auto;
   padding-top: 16px;
-  border-top: 1px solid #333333;
 }
 
 .board-brand-row {
@@ -898,6 +899,7 @@ body {
   background: #fafafa;
   padding: 16px 18px;
   transition: all 0.15s ease;
+  flex-shrink: 0;
 }
 
 .slide-text-item.is-live {
@@ -921,11 +923,17 @@ body {
   display: flex;
   flex-direction: column;
   gap: 10px;
-  min-height: 120px;
+  min-height: 0;
+  width: 100%;
+  align-self: stretch;
+  height: auto;
+  flex-shrink: 0;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease, background 0.15s ease;
 }
 
 .slide-summary-card.is-live {
   border-color: #66bb6a;
+  background: #f8fcf8;
   box-shadow: 0 0 0 1px rgba(102, 187, 106, 0.2);
 }
 
@@ -980,6 +988,7 @@ body {
   display: flex;
   flex-direction: column;
   gap: 8px;
+  min-width: 0;
 }
 
 .slide-summary-paragraph {
@@ -987,6 +996,7 @@ body {
   font-size: 0.95rem;
   line-height: 1.55;
   color: #2f3d34;
+  overflow-wrap: anywhere;
 }
 
 .slide-summary-list {
@@ -1001,6 +1011,7 @@ body {
 .slide-summary-list li {
   font-size: 0.94rem;
   line-height: 1.5;
+  overflow-wrap: anywhere;
 }
 
 .slide-summary-empty {
