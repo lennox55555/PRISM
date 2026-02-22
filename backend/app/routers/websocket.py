@@ -163,6 +163,12 @@ class AudioSessionHandler:
         # background task for periodic svg generation
         self.processing_task: Optional[asyncio.Task] = None
 
+        # grammar correction tracking
+        # stores the corrected version of visualization_text
+        self.corrected_visualization_text = ""
+        # stores the raw text length that has already been corrected
+        self.last_corrected_length = 0
+
     async def send_message_safe(self, message: WebSocketMessage):
         """
         safely send a message, catching errors if connection is closed.
@@ -346,6 +352,9 @@ class AudioSessionHandler:
                     self.visualization_text += " " + text_to_add
                     self.visualization_text = self.visualization_text.strip()
 
+                    # correct grammar for new text (sentence by sentence)
+                    await self._correct_new_sentences()
+
                 # send transcription to client
                 await self.send_message_safe(
                     WebSocketMessage(
@@ -353,7 +362,7 @@ class AudioSessionHandler:
                         data={
                             "text": text,
                             "accumulated_text": self.accumulated_text,
-                            "visualization_text": self.visualization_text,
+                            "visualization_text": self._get_visualization_text_for_generation(),
                             "visualization_active": self.visualization_active,
                             "is_final": False,
                         },
@@ -449,6 +458,10 @@ class AudioSessionHandler:
                     self.last_svg_generation_time = time.time()
                     self.last_chart_text = ""
 
+                    # reset grammar correction tracking
+                    self.corrected_visualization_text = ""
+                    self.last_corrected_length = 0
+
                     # mark this as the first generation of a new session
                     # the first generation will compare against previous session
                     self.is_first_generation_of_session = True
@@ -477,6 +490,80 @@ class AudioSessionHandler:
         # no trigger word found, return original text (with prison->prism replacement)
         return text
 
+    async def _correct_new_sentences(self):
+        """
+        correct grammar for new sentences that haven't been corrected yet.
+        works incrementally - only corrects text added since last correction.
+        """
+        raw_text = self.visualization_text
+
+        # find text that hasn't been corrected yet
+        new_text = raw_text[self.last_corrected_length:].strip()
+
+        if not new_text:
+            return
+
+        # check if we have complete sentences (ends with . ! or ?)
+        # we only correct complete sentences to avoid partial corrections
+        sentence_endings = ['.', '!', '?']
+        last_ending_pos = -1
+
+        for ending in sentence_endings:
+            pos = new_text.rfind(ending)
+            if pos > last_ending_pos:
+                last_ending_pos = pos
+
+        if last_ending_pos == -1:
+            # no complete sentences yet, wait for more text
+            return
+
+        # extract complete sentences to correct
+        text_to_correct = new_text[:last_ending_pos + 1].strip()
+
+        if not text_to_correct:
+            return
+
+        try:
+            # correct the grammar
+            corrected = await self.llm_processor.correct_grammar(text_to_correct)
+
+            # append corrected text to our corrected buffer
+            if self.corrected_visualization_text:
+                self.corrected_visualization_text += " " + corrected
+            else:
+                self.corrected_visualization_text = corrected
+
+            self.corrected_visualization_text = self.corrected_visualization_text.strip()
+
+            # update the marker for what we've corrected
+            self.last_corrected_length = len(raw_text[:self.last_corrected_length]) + last_ending_pos + 1
+
+            logger.info(f"grammar corrected: '{text_to_correct[:50]}...' -> '{corrected[:50]}...'")
+
+        except Exception as e:
+            logger.error(f"grammar correction failed: {e}")
+            # on error, just use the raw text
+            if self.corrected_visualization_text:
+                self.corrected_visualization_text += " " + text_to_correct
+            else:
+                self.corrected_visualization_text = text_to_correct
+
+    def _get_visualization_text_for_generation(self) -> str:
+        """
+        get the text to use for visualization generation.
+        uses corrected text when available, falls back to raw text.
+        """
+        # combine corrected text with any remaining uncorrected text
+        raw_text = self.visualization_text
+        uncorrected_portion = raw_text[self.last_corrected_length:].strip()
+
+        if self.corrected_visualization_text:
+            if uncorrected_portion:
+                return f"{self.corrected_visualization_text} {uncorrected_portion}"
+            return self.corrected_visualization_text
+
+        return raw_text
+
     async def _generate_and_send_visualization(self):
         """
         generate visualization from the text (svg or chart).
@@ -490,7 +577,8 @@ class AudioSessionHandler:
             logger.info("visualization generation skipped - deactivated")
             return
 
-        current_text = self.visualization_text.strip()
+        # use grammar-corrected text when available
+        current_text = self._get_visualization_text_for_generation().strip()
         if not current_text or not self.is_connected:
             return
 

@@ -4,6 +4,7 @@ handles communication with large language models to generate svg code
 from natural language descriptions. this module is responsible for
 constructing prompts, managing context, and parsing llm responses.
 includes topic similarity detection for intelligent visualization updates.
+uses anthropic claude for svg generation and openai for embeddings.
 """
 
 import logging
@@ -15,6 +16,11 @@ from app.models.schemas import SVGGenerationRequest, SVGGenerationResponse
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
+
+
+def _is_claude_model(model: str) -> bool:
+    """Check if the model is a Claude model."""
+    return model.startswith("claude")
 
 
 # prompt for checking topic similarity between two text segments
@@ -60,9 +66,25 @@ output format:
 examples of visualizations you might create:
 - bar charts, line graphs, pie charts for data
 - flowcharts and diagrams for processes
-- abstract art for emotions or concepts
 - icons and symbols for objects
 - scene illustrations for descriptions"""
+
+# prompt for grammar correction of transcribed speech
+GRAMMAR_CORRECTION_PROMPT = """you are a grammar correction assistant. fix the grammar, punctuation, and clarity of the following transcribed speech while preserving the original meaning and intent.
+
+rules:
+- fix spelling, grammar, and punctuation errors
+- make sentences clear and well-structured
+- preserve the speaker's intent and meaning exactly
+- do not add new information or change the meaning
+- do not add filler words or expand on ideas
+- keep the same tone and style
+- output ONLY the corrected text, nothing else
+
+transcribed text to fix:
+{text}
+
+corrected text:"""
 
 
 class LLMProcessor:
@@ -80,22 +102,44 @@ class LLMProcessor:
             model: model identifier, defaults to settings.llm_model
         """
         self.model = model or settings.llm_model
-        self.client = None
+        self.client = None  # anthropic client for claude models
+        self.openai_client = None  # openai client for embeddings
         self._initialize_client()
 
     def _initialize_client(self):
         """
-        initialize the openai client for llm api calls.
-        sets up the async client with the configured api key.
+        initialize the llm clients.
+        uses anthropic for claude models (svg generation) and openai for embeddings.
         """
+        # initialize anthropic client for claude svg generation
+        if _is_claude_model(self.model):
+            try:
+                import anthropic
+
+                self.client = anthropic.AsyncAnthropic(api_key=settings.claude_key)
+                logger.info(f"llm processor initialized with claude model: {self.model}")
+            except ImportError:
+                logger.warning("anthropic package not installed, claude unavailable")
+                self.client = None
+        else:
+            # fallback to openai for non-claude models
+            try:
+                from openai import AsyncOpenAI
+
+                self.client = AsyncOpenAI(api_key=settings.openai_api_key)
+                logger.info(f"llm processor initialized with openai model: {self.model}")
+            except ImportError:
+                logger.warning("openai package not installed, llm processor unavailable")
+                self.client = None
+
+        # always initialize openai client for embeddings (claude doesn't have embeddings api)
         try:
             from openai import AsyncOpenAI
 
-            self.client = AsyncOpenAI(api_key=settings.openai_api_key)
-            logger.info(f"llm processor initialized with model: {self.model}")
+            self.openai_client = AsyncOpenAI(api_key=settings.openai_api_key)
         except ImportError:
-            logger.warning("openai package not installed, llm processor unavailable")
-            self.client = None
+            logger.warning("openai package not installed, embeddings unavailable")
+            self.openai_client = None
 
     def _build_prompt(self, request: SVGGenerationRequest) -> str:
         """
@@ -212,8 +256,8 @@ class LLMProcessor:
         returns:
             tuple of (is_similar: bool, similarity_score: float)
         """
-        if not self.client:
-            # fallback: simple word overlap check when client not available
+        if not self.openai_client:
+            # fallback: simple word overlap check when openai client not available
             words1 = set(text1.lower().split())
             words2 = set(text2.lower().split())
             overlap = len(words1 & words2) / max(len(words1 | words2), 1)
@@ -222,7 +266,7 @@ class LLMProcessor:
         try:
             # use openai embeddings model for fast similarity check
             # text-embedding-3-small is fast and cost-effective
-            response = await self.client.embeddings.create(
+            response = await self.openai_client.embeddings.create(
                 model="text-embedding-3-small",
                 input=[text1, text2],
             )
@@ -268,17 +312,29 @@ class LLMProcessor:
         try:
             prompt = self._build_prompt(request)
 
-            response = await self.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": SVG_SYSTEM_PROMPT},
-                    {"role": "user", "content": prompt},
-                ],
-                temperature=0.7,  # allow some creativity in visualizations
-                max_tokens=2000,  # svg code can be lengthy
-            )
-
-            svg_code = self._extract_svg(response.choices[0].message.content)
+            if _is_claude_model(self.model):
+                # use anthropic api for claude models
+                response = await self.client.messages.create(
+                    model=self.model,
+                    max_tokens=2000,
+                    system=SVG_SYSTEM_PROMPT,
+                    messages=[
+                        {"role": "user", "content": prompt},
+                    ],
+                )
+                svg_code = self._extract_svg(response.content[0].text)
+            else:
+                # use openai api for other models
+                response = await self.client.chat.completions.create(
+                    model=self.model,
+                    messages=[
+                        {"role": "system", "content": SVG_SYSTEM_PROMPT},
+                        {"role": "user", "content": prompt},
+                    ],
+                    temperature=0.7,
+                    max_tokens=2000,
+                )
+                svg_code = self._extract_svg(response.choices[0].message.content)
 
             return SVGGenerationResponse(
                 svg_code=svg_code,
@@ -308,7 +364,7 @@ class LLMProcessor:
             f"Latest content: {cleaned[-1][:180]}"
         )
 
-        if not self.client:
+        if not self.openai_client:
             return fallback_summary
 
         try:
@@ -318,7 +374,7 @@ class LLMProcessor:
                 f"{idx + 1}. {snippet[:500]}" for idx, snippet in enumerate(snippets)
             )
 
-            response = await self.client.chat.completions.create(
+            response = await self.openai_client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=[
                     {
@@ -350,6 +406,58 @@ class LLMProcessor:
         except Exception as e:
             logger.error(f"summary generation error: {e}")
             return fallback_summary
+
+    async def correct_grammar(self, text: str) -> str:
+        """
+        correct grammar and punctuation for a sentence or short text segment.
+        uses a fast model for low-latency correction.
+
+        args:
+            text: raw transcribed text to correct
+
+        returns:
+            grammar-corrected text
+        """
+        if not text or not text.strip():
+            return text
+
+        text = text.strip()
+
+        # skip very short text (likely incomplete)
+        if len(text) < 5:
+            return text
+
+        # use openai for fast grammar correction (gpt-4o-mini is fast and cheap)
+        if not self.openai_client:
+            return text
+
+        try:
+            response = await self.openai_client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "You are a grammar correction assistant. Fix grammar, spelling, and punctuation. Output ONLY the corrected text, nothing else. Preserve the original meaning exactly.",
+                    },
+                    {
+                        "role": "user",
+                        "content": text,
+                    },
+                ],
+                temperature=0.1,
+                max_tokens=500,
+            )
+
+            corrected = (response.choices[0].message.content or "").strip()
+            if not corrected:
+                return text
+
+            logger.debug(f"grammar corrected: '{text[:50]}...' -> '{corrected[:50]}...'")
+            return corrected
+
+        except Exception as e:
+            logger.error(f"grammar correction error: {e}")
+            return text
 
     async def generate_enhanced_svg(
         self,
@@ -423,17 +531,30 @@ instructions:
             if style:
                 enhanced_prompt += f"\nstyle preferences: {style}"
 
-            response = await self.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": SVG_SYSTEM_PROMPT},
-                    {"role": "user", "content": enhanced_prompt},
-                ],
-                temperature=0.7,
-                max_tokens=2000,
-            )
+            if _is_claude_model(self.model):
+                # use anthropic api for claude models
+                response = await self.client.messages.create(
+                    model=self.model,
+                    max_tokens=2000,
+                    system=SVG_SYSTEM_PROMPT,
+                    messages=[
+                        {"role": "user", "content": enhanced_prompt},
+                    ],
+                )
+                svg_code = self._extract_svg(response.content[0].text)
+            else:
+                # use openai api for other models
+                response = await self.client.chat.completions.create(
+                    model=self.model,
+                    messages=[
+                        {"role": "system", "content": SVG_SYSTEM_PROMPT},
+                        {"role": "user", "content": enhanced_prompt},
+                    ],
+                    temperature=0.7,
+                    max_tokens=2000,
+                )
+                svg_code = self._extract_svg(response.choices[0].message.content)
 
-            svg_code = self._extract_svg(response.choices[0].message.content)
             combined_text = f"{previous_text} + {new_text}"
 
             logger.info(f"enhanced svg generated (with previous_svg: {previous_svg is not None})")
@@ -525,23 +646,35 @@ instructions:
         try:
             prompt = self._build_prompt(request)
 
-            stream = await self.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": SVG_SYSTEM_PROMPT},
-                    {"role": "user", "content": prompt},
-                ],
-                temperature=0.7,
-                max_tokens=2000,
-                stream=True,
-            )
+            if _is_claude_model(self.model):
+                # use anthropic streaming api for claude models
+                async with self.client.messages.stream(
+                    model=self.model,
+                    max_tokens=2000,
+                    system=SVG_SYSTEM_PROMPT,
+                    messages=[
+                        {"role": "user", "content": prompt},
+                    ],
+                ) as stream:
+                    async for text in stream.text_stream:
+                        yield text
+            else:
+                # use openai streaming api for other models
+                stream = await self.client.chat.completions.create(
+                    model=self.model,
+                    messages=[
+                        {"role": "system", "content": SVG_SYSTEM_PROMPT},
+                        {"role": "user", "content": prompt},
+                    ],
+                    temperature=0.7,
+                    max_tokens=2000,
+                    stream=True,
+                )
 
-            full_response = ""
-            async for chunk in stream:
-                if chunk.choices[0].delta.content:
-                    content = chunk.choices[0].delta.content
-                    full_response += content
-                    yield content
+                async for chunk in stream:
+                    if chunk.choices[0].delta.content:
+                        content = chunk.choices[0].delta.content
+                        yield content
 
         except Exception as e:
             logger.error(f"streaming generation error: {e}")
