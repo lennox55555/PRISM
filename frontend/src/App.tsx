@@ -55,6 +55,8 @@ interface SlidePage {
   items: SlideRenderItem[];
 }
 
+type SlideMode = 'full_translation' | 'summerized';
+
 const SLIDE_CHAR_LIMIT = 900;
 const VISUAL_CHAR_COST = 520;
 const MIN_CHUNK_CHARS = 160;
@@ -174,6 +176,7 @@ function App() {
   const [recordingState, setRecordingState] = useState<RecordingState>('idle');
   const [connectionState, setConnectionState] = useState<ConnectionState>('disconnected');
   const [activeSlideIndex, setActiveSlideIndex] = useState(0);
+  const [slideMode, setSlideMode] = useState<SlideMode>('full_translation');
 
   const idCounterRef = useRef(0);
   const lastCapturedTextLengthRef = useRef(0);
@@ -614,7 +617,6 @@ function App() {
 
   const canGoPrev = activeSlideIndex > 0;
   const canGoNext = activeSlideIndex < totalSlides - 1;
-  const slideMode = 'notes';
 
   return (
     <div className={`board-layout ${isLightMode ? 'is-light' : ''}`}>
@@ -734,8 +736,13 @@ function App() {
           <header className="slide-header">
             <div className="slide-mode-row">
               <span>Mode:</span>
-              <select className="slide-mode-select" value={slideMode} disabled>
-                <option value="notes">Notes</option>
+              <select
+                className="slide-mode-select"
+                value={slideMode}
+                onChange={(event) => setSlideMode(event.target.value as SlideMode)}
+              >
+                <option value="full_translation">Full Translation</option>
+                <option value="summerized">Summerized</option>
               </select>
             </div>
 
