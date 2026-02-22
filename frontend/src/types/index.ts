@@ -55,7 +55,7 @@ export interface ChartGenerationResponse {
   originalText: string;
   newTextDelta?: string;
   error?: string;
-  generationMode: 'chart';
+  generationMode: 'chart' | 'enhanced';
   chartConfidence?: number;
 }
 
@@ -83,6 +83,8 @@ export interface AudioRecorderProps {
   onError?: (error: string) => void;
   onRecordingStateChange?: (state: RecordingState) => void;
   onRealtimeTranscript?: (text: string, isFinal: boolean) => void;
+  onConnectionStateChange?: (state: ConnectionState) => void;
+  compact?: boolean;
 }
 
 // props for the transcription display component

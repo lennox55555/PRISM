@@ -136,7 +136,22 @@ class AudioSessionHandler:
         self.last_text_length = 0
         # similarity threshold for determining if topics match (0-1)
         # lower = more lenient (topics considered similar more often)
-        self.similarity_threshold = 0.50
+        self.similarity_threshold = 0.35
+
+        # cross-session tracking - preserved between prism sessions for comparison
+        # when a new session starts, we compare first chunk to this
+        self.previous_session_svg_text = ""
+        self.previous_session_svg_code = ""
+        self.previous_session_svg_context = ""
+        # flag to track if we're on the first generation of a new session
+        # only the first generation does similarity check against previous session
+        self.is_first_generation_of_session = True
+
+        # session visualization type - once set, stick with it for the entire session
+        # None = not yet determined, "chart" or "svg"
+        self.session_visualization_type: Optional[str] = None
+        # for chart sessions, store the last chart data for context
+        self.last_chart_text = ""
 
         # audio buffer for accumulating wav chunks from frontend
         self.audio_chunks: list[bytes] = []
@@ -410,14 +425,29 @@ class AudioSessionHandler:
             for activate_word in ACTIVATE_WORDS:
                 if activate_word in lower_text:
                     self.visualization_active = True
-                    # starting visualization - clear previous visualization text and topic tracking
+
+                    # preserve previous session's SVG data for cross-session comparison
+                    # only save if we had a previous session with actual SVG
+                    if self.last_svg_code:
+                        self.previous_session_svg_text = self.last_svg_text
+                        self.previous_session_svg_code = self.last_svg_code
+                        self.previous_session_svg_context = self.last_svg_context
+
+                    # clear per-session tracking for fresh start
                     self.visualization_text = ""
-                    # reset all topic tracking for fresh visualization session
                     self.last_svg_text = ""
                     self.last_svg_context = ""
                     self.last_svg_code = ""
                     self.last_text_length = 0
                     self.last_svg_generation_time = time.time()
+                    self.last_chart_text = ""
+
+                    # mark this as the first generation of a new session
+                    # the first generation will compare against previous session
+                    self.is_first_generation_of_session = True
+                    # reset visualization type - will be determined on first generation
+                    self.session_visualization_type = None
+
                     logger.info(f"visualization STARTED (trigger word: {activate_word})")
 
                     # send status update to client
@@ -448,6 +478,11 @@ class AudioSessionHandler:
         - svg: use topic similarity to enhance or create new visualizations
         sends the result to the client.
         """
+        # check if visualization is still active (may have been deactivated)
+        if not self.visualization_active:
+            logger.info("visualization generation skipped - deactivated")
+            return
+
         current_text = self.visualization_text.strip()
         if not current_text or not self.is_connected:
             return
@@ -465,14 +500,25 @@ class AudioSessionHandler:
             if not new_text_delta:
                 new_text_delta = current_text
 
-            # check if this is a chart/analytical visualization request
-            is_chart, chart_confidence = await self.chart_generator.is_chart_request(new_text_delta)
+            # determine visualization type for this session
+            # once set, stick with it for the entire prism->thank you session
+            if self.session_visualization_type is None:
+                # first generation - detect type and lock it in
+                is_chart, chart_confidence = await self.chart_generator.is_chart_request(current_text)
+                if is_chart:
+                    self.session_visualization_type = "chart"
+                    logger.info(f"session visualization type set to: chart (confidence: {chart_confidence:.2f})")
+                else:
+                    self.session_visualization_type = "svg"
+                    logger.info("session visualization type set to: svg")
 
-            if is_chart:
-                # generate chart - always new, no similarity check
-                await self._generate_and_send_chart(new_text_delta, current_text, chart_confidence)
+            # use the locked-in type for this session
+            if self.session_visualization_type == "chart":
+                # generate/regenerate chart with full accumulated text
+                _, chart_confidence = await self.chart_generator.is_chart_request(current_text)
+                await self._generate_and_send_chart(current_text, current_text, chart_confidence)
             else:
-                # generate svg with similarity checking
+                # generate svg
                 await self._generate_and_send_svg(new_text_delta, current_text)
 
         except Exception as e:
@@ -488,17 +534,25 @@ class AudioSessionHandler:
     async def _generate_and_send_chart(self, new_text_delta: str, current_text: str, confidence: float):
         """
         generate a matplotlib chart visualization.
-        charts always generate fresh - no similarity checking.
+        within a session, charts are regenerated with full accumulated context
+        to "enhance" them as more data comes in.
 
         args:
             new_text_delta: the new text to visualize
             current_text: full accumulated text
             confidence: confidence that this is a chart request
         """
-        logger.info(f"generating chart (confidence: {confidence:.2f}) for: {new_text_delta[:50]}...")
+        # determine if this is initial or enhanced chart
+        is_enhanced = bool(self.last_chart_text)
+        generation_mode = "enhanced" if is_enhanced else "chart"
 
-        # generate the chart
-        result = await self.chart_generator.generate_chart(new_text_delta)
+        if is_enhanced:
+            logger.info(f"enhancing chart with full context: {current_text[:50]}...")
+        else:
+            logger.info(f"generating initial chart (confidence: {confidence:.2f}) for: {current_text[:50]}...")
+
+        # always use full accumulated text for charts (gives more context for better charts)
+        result = await self.chart_generator.generate_chart(current_text)
 
         if result["error"]:
             logger.error(f"chart generation failed: {result['error']}")
@@ -506,10 +560,11 @@ class AudioSessionHandler:
             await self._generate_and_send_svg(new_text_delta, current_text)
             return
 
-        # update tracking (charts reset the context since they're always new)
-        self.last_svg_text = new_text_delta
+        # update tracking
+        self.last_chart_text = current_text
+        self.last_svg_text = current_text
         self.last_text_length = len(current_text)
-        self.last_svg_context = new_text_delta
+        self.last_svg_context = current_text
 
         # send chart to client
         await self.send_message_safe(
@@ -519,9 +574,9 @@ class AudioSessionHandler:
                     "image": result["image"],  # base64 png
                     "code": result["code"],  # matplotlib code
                     "description": result["description"],
-                    "original_text": new_text_delta,
+                    "original_text": current_text,
                     "new_text_delta": new_text_delta,
-                    "generation_mode": "chart",
+                    "generation_mode": generation_mode,
                     "chart_confidence": round(confidence, 3),
                 },
             ),
@@ -530,12 +585,21 @@ class AudioSessionHandler:
 
     async def _generate_and_send_svg(self, new_text_delta: str, current_text: str):
         """
-        generate svg visualization with topic similarity checking.
-        compares the new text delta against previous visualization
-        to determine whether to enhance or create new.
+        generate svg visualization.
+
+        within a single prism->thank you session:
+        - only ONE visualization that gets continuously enhanced
+        - no similarity checks within session
+        - uses full accumulated text for more context
+
+        when starting a new session (saying prism again):
+        - compares FIRST chunk against previous session's text
+        - if similar: continues editing previous session's image
+        - if different: creates new image
+        - subsequent chunks always enhance (no similarity checks)
 
         args:
-            new_text_delta: the new text to compare/visualize
+            new_text_delta: the new text since last generation
             current_text: full accumulated text
         """
         try:
@@ -543,56 +607,81 @@ class AudioSessionHandler:
             similarity_score = None
             generation_mode = "initial"
 
-            # check if we have a previous visualization to compare against
-            if self.last_svg_text:
-                # compare ONLY the new delta against the previous svg text
-                is_similar, similarity_score = await self.llm_processor.check_topic_similarity(
-                    self.last_svg_text,
-                    new_text_delta,
-                    threshold=self.similarity_threshold
-                )
+            if self.is_first_generation_of_session:
+                # FIRST generation of this session - check against previous session
+                self.is_first_generation_of_session = False
 
-                logger.info(
-                    f"comparing new delta: '{new_text_delta[:50]}...' "
-                    f"vs previous: '{self.last_svg_text[:50]}...' "
-                    f"= {similarity_score:.3f}"
-                )
+                if self.previous_session_svg_code:
+                    # we have a previous session - compare against it
+                    is_similar, similarity_score = await self.llm_processor.check_topic_similarity(
+                        self.previous_session_svg_text,
+                        current_text,  # compare full first chunk text
+                        threshold=self.similarity_threshold
+                    )
 
-                if is_similar:
-                    # topics are similar - enhance the visualization
-                    # pass the previous svg code so llm can see and modify it
                     logger.info(
-                        f"topic similar (score: {similarity_score:.3f}), "
-                        f"enhancing visualization with previous svg code"
+                        f"comparing new session: '{current_text[:50]}...' "
+                        f"vs previous session: '{self.previous_session_svg_text[:50]}...' "
+                        f"= {similarity_score:.3f}"
+                    )
+
+                    if is_similar:
+                        # similar to previous session - continue editing that image
+                        logger.info(
+                            f"new session similar to previous (score: {similarity_score:.3f}), "
+                            f"continuing previous session's visualization"
+                        )
+                        response = await self.llm_processor.generate_enhanced_svg(
+                            previous_text=self.previous_session_svg_context,
+                            new_text=current_text,
+                            previous_svg=self.previous_session_svg_code,
+                        )
+                        generation_mode = "enhanced"
+                        self.last_svg_context = current_text
+                        # carry over the previous session's SVG as our base
+                        self.last_svg_code = self.previous_session_svg_code
+                    else:
+                        # different topic - create fresh visualization
+                        logger.info(
+                            f"new session different from previous (score: {similarity_score:.3f}), "
+                            f"creating new visualization"
+                        )
+                        request = SVGGenerationRequest(text=current_text)
+                        response = await self.llm_processor.generate_svg(request)
+                        generation_mode = "new_topic"
+                        self.last_svg_context = current_text
+                else:
+                    # no previous session - create initial visualization
+                    logger.info(f"generating initial svg (no previous session): {current_text[:50]}...")
+                    request = SVGGenerationRequest(text=current_text)
+                    response = await self.llm_processor.generate_svg(request)
+                    generation_mode = "initial"
+                    self.last_svg_context = current_text
+            else:
+                # SUBSEQUENT generation within same session - ALWAYS enhance
+                # no similarity check - just keep building on the same visualization
+                if self.last_svg_code:
+                    # we have a previous SVG to enhance
+                    logger.info(
+                        f"enhancing within session with full context: {current_text[:50]}..."
                     )
                     response = await self.llm_processor.generate_enhanced_svg(
                         previous_text=self.last_svg_context,
-                        new_text=new_text_delta,
-                        previous_svg=self.last_svg_code,  # pass the actual svg code
+                        new_text=current_text,  # use FULL accumulated text for more context
+                        previous_svg=self.last_svg_code,
                     )
                     generation_mode = "enhanced"
                     self.last_svg_context = current_text
                 else:
-                    # topics are different - create fresh visualization
-                    logger.info(
-                        f"topic changed (score: {similarity_score:.3f}), "
-                        f"generating new visualization for new topic"
-                    )
-                    request = SVGGenerationRequest(text=new_text_delta)
+                    # no previous SVG yet - create initial one
+                    logger.info(f"generating initial svg (no previous in session): {current_text[:50]}...")
+                    request = SVGGenerationRequest(text=current_text)
                     response = await self.llm_processor.generate_svg(request)
-                    generation_mode = "new_topic"
-                    self.last_svg_context = new_text_delta
-                    self.last_svg_code = ""  # clear previous svg for new topic
-            else:
-                # no previous visualization - create initial one
-                logger.info(f"generating initial svg for: {current_text[:50]}...")
-                request = SVGGenerationRequest(text=current_text)
-                response = await self.llm_processor.generate_svg(request)
-                generation_mode = "initial"
-                self.last_svg_context = current_text
+                    generation_mode = "initial"
+                    self.last_svg_context = current_text
 
-            # update tracking for next comparison
-            self.last_svg_text = new_text_delta
+            # update tracking for next generation
+            self.last_svg_text = current_text  # store full text for cross-session comparison
             self.last_text_length = len(current_text)
             # store the raw svg code for use in future enhancements
             self.last_svg_code = response.svg_code
