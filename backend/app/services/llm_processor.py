@@ -175,8 +175,28 @@ class LLMProcessor:
             return self.openai_model
         return None
 
-    def _extract_svg(self, response_text: str) -> str:
+    def _get_text_content(self, content) -> str:
+        """Extract text from response content, handling both string and list formats."""
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            # Claude can return list of content blocks
+            text_parts = []
+            for block in content:
+                if isinstance(block, str):
+                    text_parts.append(block)
+                elif isinstance(block, dict) and block.get("type") == "text":
+                    text_parts.append(block.get("text", ""))
+                elif hasattr(block, "text"):
+                    text_parts.append(block.text)
+            return "".join(text_parts)
+        return str(content)
+
+    def _extract_svg(self, response_text) -> str:
         """Extract SVG code from LLM response, handling truncated responses."""
+        # Ensure we have a string
+        response_text = self._get_text_content(response_text)
+
         # First try to find complete SVG
         svg_pattern = r"<svg[\s\S]*?</svg>"
         match = re.search(svg_pattern, response_text, re.IGNORECASE)
@@ -569,7 +589,7 @@ Instructions:
                     max_retries=2,
                 )
                 response = await summary_model.ainvoke(messages)
-                raw_summary = response.content
+                raw_summary = self._get_text_content(response.content)
                 summary = self._normalize_summary(raw_summary, fallback_summary)
                 elapsed_ms = int((time.perf_counter() - started) * 1000)
 
@@ -597,7 +617,7 @@ Instructions:
                     max_retries=2,
                 )
                 response = await summary_model.ainvoke(messages)
-                raw_summary = response.content
+                raw_summary = self._get_text_content(response.content)
                 summary = self._normalize_summary(raw_summary, fallback_summary)
                 elapsed_ms = int((time.perf_counter() - started) * 1000)
 
@@ -646,7 +666,7 @@ Instructions:
                 HumanMessage(content=text.strip()),
             ]
             response = await model.ainvoke(messages)
-            corrected = response.content.strip()
+            corrected = self._get_text_content(response.content).strip()
 
             if not corrected:
                 return text
