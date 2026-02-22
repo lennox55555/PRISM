@@ -19,6 +19,7 @@ interface VisualizationVersion {
   timestamp: Date;
   generationMode?: 'initial' | 'enhanced' | 'new_topic' | 'chart' | 'text';
   similarityScore?: number | null;
+  summary?: string;  // stored summary for this version
 }
 
 interface NoteHistoryItem {
@@ -35,9 +36,12 @@ interface NoteHistoryItem {
   generationMode?: 'initial' | 'enhanced' | 'new_topic' | 'chart' | 'text';
   similarityScore?: number | null;
   similarityThreshold?: number;
+  summary?: string;  // stored summary for this slide
   // version history for enhanced visualizations
   versions?: VisualizationVersion[];
   currentVersionIndex?: number;
+  // session ID for grouping visualizations from same prism session
+  sessionId?: string;
 }
 
 interface Session {
@@ -58,12 +62,14 @@ interface SlideSourceItem {
   svg?: string;
   chartImage?: string;
   description?: string;
+  summary?: string;
 }
 
 interface SlideRenderItem extends SlideSourceItem {
   key: string;
   text: string;
   isContinuation: boolean;
+  summary?: string;
 }
 
 interface SlidePage {
@@ -222,7 +228,12 @@ function sanitizeFilename(input: string): string {
 
 function normalizePrismWord(value: string): string {
   // Preserve transcript content except common misrecognitions of "prism".
-  return value.replace(/\bpri(?:son|sion)\b/gi, 'prism');
+  // Handles: prison, prisons, prizm, présume, presume, pris, prysm, prisim, preson, presom
+  return value
+    .replace(/\bpri(?:son|sions?|zz?m|sim|szm)\b/gi, 'prism')
+    .replace(/\bpr[eé]s(?:ume|om)\b/gi, 'prism')
+    .replace(/\bprysm\b/gi, 'prism')
+    .replace(/\bpres?on\b/gi, 'prism');
 }
 
 async function svgMarkupToPngDataUrl(
@@ -368,6 +379,8 @@ function App() {
   const [summaryStatus, setSummaryStatus] = useState<SummaryStatus>('idle');
   const [summaryError, setSummaryError] = useState<string | null>(null);
   const [summaryDebug, setSummaryDebug] = useState<LiveSummaryDebug | null>(null);
+  const [pendingNewTopicNavigation, setPendingNewTopicNavigation] = useState(false);
+  const [slideAnimationClass, setSlideAnimationClass] = useState<'page-turn-left' | 'page-turn-right' | ''>('');
 
   const idCounterRef = useRef(0);
   const lastCapturedTextLengthRef = useRef(0);
@@ -375,6 +388,9 @@ function App() {
   const lastSummarySourceKeyRef = useRef('');
   const lastSummarizedLengthRef = useRef(0);
   const hasRealtimeTranscriptRef = useRef(false);
+  const liveSummaryRef = useRef(liveSummary);
+  // Track when we should navigate to a new slide (set when prism is said again after existing slides)
+  const shouldNavigateOnNewSlideRef = useRef(false);
 
   const transcriptionTextRef = useRef(transcriptionText);
   const notesHistoryRef = useRef(notesHistory);
@@ -382,6 +398,10 @@ function App() {
   useEffect(() => {
     transcriptionTextRef.current = transcriptionText;
   }, [transcriptionText]);
+
+  useEffect(() => {
+    liveSummaryRef.current = liveSummary;
+  }, [liveSummary]);
 
   // Track if notes have been loaded initially
   const notesInitializedRef = useRef(false);
@@ -691,6 +711,43 @@ function App() {
     });
   }, [activeSessionId]);
 
+  // Clear all local storage data and reset to fresh state
+  const handleClearAllData = useCallback(() => {
+    if (!window.confirm('Are you sure you want to clear ALL data? This cannot be undone.')) {
+      return;
+    }
+
+    // Clear localStorage
+    localStorage.removeItem(STORAGE_KEY);
+
+    // Reset to fresh state
+    const freshSession: Session = {
+      id: 1,
+      name: 'Session 1',
+      notes: [],
+      transcriptionText: '',
+    };
+
+    setSessions([freshSession]);
+    setActiveSessionId(1);
+    setNotesHistory([]);
+    setTranscriptionText('');
+    setRealtimeTranscript('');
+    hasRealtimeTranscriptRef.current = false;
+    setLiveSummary('');
+    setSummaryStatus('idle');
+    setSummaryError(null);
+    setSummaryDebug(null);
+    setActiveSlideIndex(0);
+    setHasUnsavedChanges(false);
+    lastSummarySourceKeyRef.current = '';
+    lastSummarizedLengthRef.current = 0;
+    lastCapturedTextLengthRef.current = 0;
+    idCounterRef.current = 1;
+
+    console.log('All data cleared from localStorage');
+  }, []);
+
   const handleRenameSession = useCallback((sessionId: number) => {
     const target = sessions.find((s) => s.id === sessionId);
     if (!target) return;
@@ -730,11 +787,24 @@ function App() {
   }, [activeSessionId, notesHistory, sessions, transcriptionText]);
 
   const handleTranscription = useCallback((result: TranscriptionResult) => {
+    // Check if this is a new session - clear text before adding new content
+    if ((result as any).new_session) {
+      console.log('[TRANSCRIPTION] New session started - clearing text and summary');
+      setTranscriptionText('');
+      setLiveSummary('');
+      setRealtimeTranscript('');
+      hasRealtimeTranscriptRef.current = false;
+      lastCapturedTextLengthRef.current = 0;
+    }
+
     // If browser realtime transcript is available, never overwrite it with backend chunks.
     const shouldUseBackendText = !hasRealtimeTranscriptRef.current;
 
     if (shouldUseBackendText) {
-      if (result.accumulatedText) {
+      if ((result as any).new_session) {
+        // New session - start fresh with just the new text
+        setTranscriptionText(normalizePrismWord(result.text || ''));
+      } else if (result.accumulatedText) {
         setTranscriptionText(normalizePrismWord(result.accumulatedText));
       } else {
         setTranscriptionText((prev) => `${prev} ${normalizePrismWord(result.text)}`.trim());
@@ -743,13 +813,21 @@ function App() {
 
     setError(null);
 
-    if (typeof (result as any).visualizationActive === 'boolean') {
-      setVisualizationActive((result as any).visualizationActive);
+    // Backend sends snake_case: visualization_active
+    if (typeof (result as any).visualization_active === 'boolean') {
+      console.log('[PRISM] visualization_active received:', (result as any).visualization_active);
+      setVisualizationActive((result as any).visualization_active);
     }
   }, []);
 
   const handleSVGGenerated = useCallback((response: SVGGenerationResponse) => {
+    console.log('[SVG] ========== SVG RECEIVED ==========');
+    console.log('[SVG] Generation mode:', response.generationMode);
+    console.log('[SVG] Session ID:', response.sessionId);
+    console.log('[SVG] Original text:', response.originalText?.substring(0, 80) + '...');
+
     const hasValidSvg = isRenderableSvg(response.svg);
+    console.log('[SVG] Has valid SVG:', hasValidSvg);
 
     if (hasValidSvg && !response.error) {
       const newVersion: VisualizationVersion = {
@@ -759,51 +837,32 @@ function App() {
         timestamp: new Date(),
         generationMode: response.generationMode,
         similarityScore: response.similarityScore,
+        summary: liveSummaryRef.current || undefined,
       };
 
       lastCapturedTextLengthRef.current = transcriptionTextRef.current.length;
+      const currentSummary = liveSummaryRef.current || undefined;
 
-      if (response.generationMode === 'enhanced') {
-        // add to existing visualization's version history
-        setNotesHistory((prev) => {
-          if (prev.length === 0) {
-            return [{
-              id: idCounterRef.current++,
-              type: 'svg',
-              svg: response.svg,
-              description: response.description,
-              originalText: response.originalText,
-              newTextDelta: response.newTextDelta || response.originalText,
-              timestamp: new Date(),
-              generationMode: response.generationMode,
-              similarityScore: response.similarityScore,
-              similarityThreshold: response.similarityThreshold,
-              versions: [newVersion],
-              currentVersionIndex: 0,
-            }];
-          }
+      // Check BEFORE state update whether we'll be creating a new slide
+      const existingIndex = response.sessionId
+        ? notesHistoryRef.current.findIndex(item => item.sessionId === response.sessionId)
+        : -1;
+      const willCreateNewSlide = existingIndex === -1;
 
-          const lastSvgIndex = prev.map(item => item.type).lastIndexOf('svg');
-          if (lastSvgIndex === -1) {
-            return [...prev, {
-              id: idCounterRef.current++,
-              type: 'svg' as const,
-              svg: response.svg,
-              description: response.description,
-              originalText: response.originalText,
-              newTextDelta: response.newTextDelta || response.originalText,
-              timestamp: new Date(),
-              generationMode: response.generationMode,
-              similarityScore: response.similarityScore,
-              similarityThreshold: response.similarityThreshold,
-              versions: [newVersion],
-              currentVersionIndex: 0,
-            }];
-          }
+      // Use sessionId to find existing note from same prism session
+      setNotesHistory((prev) => {
+        // Look for existing note with same sessionId
+        const prevExistingIndex = response.sessionId
+          ? prev.findIndex(item => item.sessionId === response.sessionId)
+          : -1;
 
-          // add new version to existing SVG item
+        console.log('[SVG] Looking for sessionId:', response.sessionId, 'found at index:', prevExistingIndex);
+
+        if (prevExistingIndex !== -1) {
+          // Found existing note with same sessionId - add as version
+          console.log('[SVG] >>> ADDING VERSION to existing slide (sessionId match)');
           const updated = [...prev];
-          const existingItem = updated[lastSvgIndex];
+          const existingItem = updated[prevExistingIndex];
           const existingVersions = existingItem.versions || [{
             svg: existingItem.svg,
             description: existingItem.description,
@@ -811,10 +870,11 @@ function App() {
             timestamp: existingItem.timestamp,
             generationMode: existingItem.generationMode,
             similarityScore: existingItem.similarityScore,
+            summary: existingItem.summary,
           }];
 
           const newVersions = [...existingVersions, newVersion];
-          updated[lastSvgIndex] = {
+          updated[prevExistingIndex] = {
             ...existingItem,
             svg: response.svg,
             description: response.description,
@@ -822,28 +882,39 @@ function App() {
             generationMode: response.generationMode,
             similarityScore: response.similarityScore,
             similarityThreshold: response.similarityThreshold,
+            summary: currentSummary,
             versions: newVersions,
             currentVersionIndex: newVersions.length - 1,
           };
           return updated;
-        });
-      } else {
-        // new topic or initial - create new item with version history
-        const newItem: NoteHistoryItem = {
-          id: idCounterRef.current++,
-          type: 'svg',
-          svg: response.svg,
-          description: response.description,
-          originalText: response.originalText,
-          newTextDelta: response.newTextDelta || response.originalText,
-          timestamp: new Date(),
-          generationMode: response.generationMode,
-          similarityScore: response.similarityScore,
-          similarityThreshold: response.similarityThreshold,
-          versions: [newVersion],
-          currentVersionIndex: 0,
-        };
-        setNotesHistory((prev) => [...prev, newItem]);
+        } else {
+          // No existing note with this sessionId - create new slide
+          console.log('[SVG] >>> CREATING NEW SLIDE (new sessionId)');
+          const newItem: NoteHistoryItem = {
+            id: idCounterRef.current++,
+            type: 'svg',
+            svg: response.svg,
+            description: response.description,
+            originalText: response.originalText,
+            newTextDelta: response.newTextDelta || response.originalText,
+            timestamp: new Date(),
+            generationMode: response.generationMode,
+            similarityScore: response.similarityScore,
+            similarityThreshold: response.similarityThreshold,
+            summary: currentSummary,
+            versions: [newVersion],
+            currentVersionIndex: 0,
+            sessionId: response.sessionId,
+          };
+          return [...prev, newItem];
+        }
+      });
+
+      // If we created a new slide and should navigate (new prism session with existing slides)
+      if (willCreateNewSlide && shouldNavigateOnNewSlideRef.current) {
+        console.log('[SVG] Triggering navigation to new slide');
+        shouldNavigateOnNewSlideRef.current = false;
+        setPendingNewTopicNavigation(true);
       }
     }
 
@@ -855,7 +926,11 @@ function App() {
   }, []);
 
   const handleChartGenerated = useCallback((response: ChartGenerationResponse) => {
+    console.log('[CHART] ========== CHART RECEIVED ==========');
+    console.log('[CHART] Session ID:', response.sessionId);
+
     if (response.image && !response.error) {
+      const currentSummary = liveSummaryRef.current || undefined;
       const newVersion: VisualizationVersion = {
         chartImage: response.image,
         chartCode: response.code,
@@ -863,51 +938,30 @@ function App() {
         newTextDelta: response.newTextDelta || response.originalText,
         timestamp: new Date(),
         generationMode: response.generationMode,
+        summary: currentSummary,
       };
 
       lastCapturedTextLengthRef.current = transcriptionTextRef.current.length;
 
-      if (response.generationMode === 'enhanced') {
-        // add to existing chart's version history
-        setNotesHistory((prev) => {
-          if (prev.length === 0) {
-            return [{
-              id: idCounterRef.current++,
-              type: 'chart',
-              chartImage: response.image,
-              chartCode: response.code,
-              chartConfidence: response.chartConfidence,
-              description: response.description,
-              originalText: response.originalText,
-              newTextDelta: response.newTextDelta || response.originalText,
-              timestamp: new Date(),
-              generationMode: response.generationMode,
-              versions: [newVersion],
-              currentVersionIndex: 0,
-            }];
-          }
+      // Check BEFORE state update whether we'll be creating a new slide
+      const existingIndex = response.sessionId
+        ? notesHistoryRef.current.findIndex(item => item.sessionId === response.sessionId)
+        : -1;
+      const willCreateNewSlide = existingIndex === -1;
 
-          const lastChartIndex = prev.map(item => item.type).lastIndexOf('chart');
-          if (lastChartIndex === -1) {
-            return [...prev, {
-              id: idCounterRef.current++,
-              type: 'chart' as const,
-              chartImage: response.image,
-              chartCode: response.code,
-              chartConfidence: response.chartConfidence,
-              description: response.description,
-              originalText: response.originalText,
-              newTextDelta: response.newTextDelta || response.originalText,
-              timestamp: new Date(),
-              generationMode: response.generationMode,
-              versions: [newVersion],
-              currentVersionIndex: 0,
-            }];
-          }
+      // Use sessionId to find existing note from same prism session
+      setNotesHistory((prev) => {
+        const prevExistingIndex = response.sessionId
+          ? prev.findIndex(item => item.sessionId === response.sessionId)
+          : -1;
 
-          // add new version to existing chart item
+        console.log('[CHART] Looking for sessionId:', response.sessionId, 'found at index:', prevExistingIndex);
+
+        if (prevExistingIndex !== -1) {
+          // Found existing note with same sessionId - add as version
+          console.log('[CHART] >>> ADDING VERSION to existing slide');
           const updated = [...prev];
-          const existingItem = updated[lastChartIndex];
+          const existingItem = updated[prevExistingIndex];
           const existingVersions = existingItem.versions || [{
             chartImage: existingItem.chartImage,
             chartCode: existingItem.chartCode,
@@ -915,38 +969,50 @@ function App() {
             newTextDelta: existingItem.newTextDelta,
             timestamp: existingItem.timestamp,
             generationMode: existingItem.generationMode,
+            summary: existingItem.summary,
           }];
 
           const newVersions = [...existingVersions, newVersion];
-          updated[lastChartIndex] = {
+          updated[prevExistingIndex] = {
             ...existingItem,
             chartImage: response.image,
             chartCode: response.code,
             description: response.description,
             newTextDelta: response.newTextDelta || response.originalText,
             generationMode: response.generationMode,
+            summary: currentSummary,
             versions: newVersions,
             currentVersionIndex: newVersions.length - 1,
           };
           return updated;
-        });
-      } else {
-        // initial chart - create new item with version history
-        const newItem: NoteHistoryItem = {
-          id: idCounterRef.current++,
-          type: 'chart',
-          chartImage: response.image,
-          chartCode: response.code,
-          chartConfidence: response.chartConfidence,
-          description: response.description,
-          originalText: response.originalText,
-          newTextDelta: response.newTextDelta || response.originalText,
-          timestamp: new Date(),
-          generationMode: 'chart',
-          versions: [newVersion],
-          currentVersionIndex: 0,
-        };
-        setNotesHistory((prev) => [...prev, newItem]);
+        } else {
+          // No existing note with this sessionId - create new slide
+          console.log('[CHART] >>> CREATING NEW SLIDE');
+          const newItem: NoteHistoryItem = {
+            id: idCounterRef.current++,
+            type: 'chart',
+            chartImage: response.image,
+            chartCode: response.code,
+            chartConfidence: response.chartConfidence,
+            description: response.description,
+            originalText: response.originalText,
+            newTextDelta: response.newTextDelta || response.originalText,
+            timestamp: new Date(),
+            generationMode: response.generationMode,
+            summary: currentSummary,
+            versions: [newVersion],
+            currentVersionIndex: 0,
+            sessionId: response.sessionId,
+          };
+          return [...prev, newItem];
+        }
+      });
+
+      // If we created a new slide and should navigate (new prism session with existing slides)
+      if (willCreateNewSlide && shouldNavigateOnNewSlideRef.current) {
+        console.log('[CHART] Triggering navigation to new slide');
+        shouldNavigateOnNewSlideRef.current = false;
+        setPendingNewTopicNavigation(true);
       }
     }
 
@@ -1850,6 +1916,7 @@ function App() {
       svg: note.svg,
       chartImage: note.chartImage,
       description: note.description,
+      summary: note.summary,
     }));
 
     const liveText = realtimeTranscript.trim();
@@ -1893,12 +1960,38 @@ function App() {
       };
 
       if (hasVisual) {
-        // Visualization gets its own page, include any preceding text notes
-        pages.push({
-          id: pages.length + 1,
-          items: [...currentTextItems, item],
-        });
-        currentTextItems = [];
+        if (source.generationMode === 'new_topic') {
+          // For new_topic: text spoken before "prism" stays on the previous page
+          if (currentTextItems.length > 0) {
+            if (pages.length > 0) {
+              // Append text to the previous visualization's page
+              const lastPage = pages[pages.length - 1];
+              pages[pages.length - 1] = {
+                ...lastPage,
+                items: [...lastPage.items, ...currentTextItems],
+              };
+            } else {
+              // No previous page, create one for the text
+              pages.push({
+                id: pages.length + 1,
+                items: currentTextItems,
+              });
+            }
+            currentTextItems = [];
+          }
+          // New topic visualization gets its own fresh page
+          pages.push({
+            id: pages.length + 1,
+            items: [item],
+          });
+        } else {
+          // For enhanced, initial, chart: include preceding text notes with the visualization
+          pages.push({
+            id: pages.length + 1,
+            items: [...currentTextItems, item],
+          });
+          currentTextItems = [];
+        }
       } else {
         // Text/live notes accumulate until next visualization
         currentTextItems.push(item);
@@ -1938,16 +2031,43 @@ function App() {
   useEffect(() => {
     // detect transition: visualization was OFF, now ON (new prism session started)
     if (visualizationActive && !prevVisualizationActiveRef.current) {
-      // new visualization session started - go to latest slide
-      setActiveSlideIndex(Math.max(totalSlides - 1, 0));
+      console.log('[PRISM] === NEW PRISM SESSION STARTED ===');
+      // CLEAR text and summary for the new prism session - each page gets fresh content
+      setTranscriptionText('');
+      setLiveSummary('');
+      lastCapturedTextLengthRef.current = 0;
+      // If there are existing slides, set flag to navigate when the new slide is created
+      // (not before, so we don't navigate to the old last slide)
+      if (notesHistory.length > 0) {
+        console.log('[PRISM] Will navigate to new slide when first visualization is created');
+        shouldNavigateOnNewSlideRef.current = true;
+      }
+    } else if (!visualizationActive && prevVisualizationActiveRef.current) {
+      console.log('[PRISM] === PRISM SESSION ENDED (thank you) ===');
     }
     prevVisualizationActiveRef.current = visualizationActive;
-  }, [visualizationActive, totalSlides]);
+  }, [visualizationActive, notesHistory.length]);
 
   // DON'T auto-advance during a session - removed the auto-advance on totalSlides change
   useEffect(() => {
     previousSlideCountRef.current = totalSlides;
   }, [totalSlides]);
+
+  // Auto-navigate to new page when new prism session starts
+  useEffect(() => {
+    if (pendingNewTopicNavigation) {
+      setPendingNewTopicNavigation(false);
+      // Navigate to the last slide (the newly created page) with animation
+      const targetIndex = slidePages.length - 1;
+      if (targetIndex >= 0) {
+        setSlideAnimationClass('page-turn-left');
+        setTimeout(() => {
+          setActiveSlideIndex(targetIndex);
+          setTimeout(() => setSlideAnimationClass(''), 300);
+        }, 50);
+      }
+    }
+  }, [pendingNewTopicNavigation, slidePages]);
 
   const previousSessionIdRef = useRef(activeSessionId);
   useEffect(() => {
@@ -1960,11 +2080,66 @@ function App() {
   const canGoPrev = activeSlideIndex > 0;
   const canGoNext = activeSlideIndex < totalSlides - 1;
   const isSummaryMode = notesMode === 'summary';
-  const transcriptDisplayText = (
-    recordingState === 'recording' && realtimeTranscript.trim().length > 0
-      ? realtimeTranscript
-      : transcriptionText
-  ).trim();
+
+  // Handle slide navigation with page turn animation
+  const navigateSlide = useCallback((direction: 'prev' | 'next') => {
+    const animClass = direction === 'next' ? 'page-turn-left' : 'page-turn-right';
+    setSlideAnimationClass(animClass);
+
+    // Update slide index after a brief delay to let the animation start
+    setTimeout(() => {
+      if (direction === 'next') {
+        setActiveSlideIndex((prev) => Math.min(prev + 1, totalSlides - 1));
+      } else {
+        setActiveSlideIndex((prev) => Math.max(prev - 1, 0));
+      }
+      // Clear animation class after animation completes
+      setTimeout(() => setSlideAnimationClass(''), 300);
+    }, 50);
+  }, [totalSlides]);
+
+  // Determine if we're viewing the latest slide (which shows live content)
+  const isOnLatestSlide = activeSlideIndex === totalSlides - 1;
+
+  // Get the text content from the active slide's items
+  const activeSlideText = useMemo(() => {
+    if (!activeSlide || activeSlide.items.length === 0) return '';
+    return activeSlide.items
+      .map(item => item.text)
+      .filter(text => text && text !== 'Listening...' && text !== 'Note captured.')
+      .join(' ')
+      .trim();
+  }, [activeSlide]);
+
+  // Get the stored summary from the active slide (for historical slides)
+  const activeSlideStoredSummary = useMemo(() => {
+    if (!activeSlide || activeSlide.items.length === 0) return '';
+    // Find the first item with a stored summary (usually the visualization)
+    const itemWithSummary = activeSlide.items.find(item => item.summary);
+    return itemWithSummary?.summary || '';
+  }, [activeSlide]);
+
+  // Parse stored summary into line groups for display
+  const storedSummaryLineGroups = useMemo(
+    () => groupSummaryLines(activeSlideStoredSummary),
+    [activeSlideStoredSummary]
+  );
+
+  // For transcript display:
+  // - On latest slide during recording: show live transcript
+  // - On historical slides: show ONLY that slide's stored text (never current transcription)
+  const transcriptDisplayText = useMemo(() => {
+    if (isOnLatestSlide) {
+      // Latest slide - show live content
+      if (recordingState === 'recording') {
+        return realtimeTranscript.trim() || transcriptionText.trim();
+      }
+      // Not recording but on latest slide - show current transcription
+      return transcriptionText.trim();
+    }
+    // Historical slide - show ONLY that slide's stored text, never current transcription
+    return activeSlideText;
+  }, [isOnLatestSlide, recordingState, realtimeTranscript, transcriptionText, activeSlideText]);
   const summaryStatusLabel = summaryStatus === 'updating'
     ? 'Updating...'
     : summaryStatus === 'ready'
@@ -2003,6 +2178,27 @@ function App() {
           <span className="new-session-plus">+</span>
           {!isSidebarCollapsed && <span>New Board</span>}
         </button>
+
+        {!isSidebarCollapsed && (
+          <button
+            type="button"
+            className="board-clear-all"
+            onClick={handleClearAllData}
+            style={{
+              padding: '8px 12px',
+              marginTop: '8px',
+              background: 'transparent',
+              border: '1px solid rgba(239, 68, 68, 0.3)',
+              borderRadius: '6px',
+              color: '#ef4444',
+              cursor: 'pointer',
+              fontSize: '12px',
+              width: '100%',
+            }}
+          >
+            Clear All Data
+          </button>
+        )}
 
         {false && !isSidebarCollapsed && (
           <details className="export-dropdown sidebar-export-dropdown">
@@ -2258,9 +2454,9 @@ function App() {
             <div className="slide-count">Slide {Math.min(activeSlideIndex + 1, totalSlides)} / {totalSlides}</div>
           </header>
 
-          <div className="slide-content">
+          <div className={`slide-content ${slideAnimationClass}`}>
             <div className="slide-text-column">
-              {isSummaryMode ? (
+              {isSummaryMode && isOnLatestSlide ? (
                 <article className={`slide-summary-card ${recordingState === 'recording' ? 'is-live' : ''}`}>
                   <div className="slide-summary-header">
                     <h3 className="slide-summary-title">Live Summarized Notes</h3>
@@ -2305,6 +2501,35 @@ function App() {
                       {summaryDebug.fallbackUsed && <span>Fallback in use</span>}
                     </div>
                   )}
+                </article>
+              ) : isSummaryMode && !isOnLatestSlide && activeSlideStoredSummary ? (
+                <article className="slide-summary-card">
+                  <div className="slide-summary-header">
+                    <h3 className="slide-summary-title">Slide {activeSlideIndex + 1} Summary</h3>
+                    <span className="slide-summary-status is-ready">Saved</span>
+                  </div>
+                  <div className="slide-summary-content">
+                    {storedSummaryLineGroups.paragraphLines.map((line, index) => (
+                      <p key={`stored-paragraph-${index}`} className="slide-summary-paragraph">
+                        {line}
+                      </p>
+                    ))}
+                    {storedSummaryLineGroups.bulletLines.length > 0 && (
+                      <ul className="slide-summary-list">
+                        {storedSummaryLineGroups.bulletLines.map((line, index) => (
+                          <li key={`stored-bullet-${index}`}>{line}</li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+                </article>
+              ) : isSummaryMode && !isOnLatestSlide && activeSlideText ? (
+                <article className="slide-text-item">
+                  <div className="slide-summary-header">
+                    <h3 className="slide-summary-title">Slide {activeSlideIndex + 1} Notes</h3>
+                    <span className="slide-summary-status is-idle">No Summary</span>
+                  </div>
+                  <p className="slide-text">{activeSlideText}</p>
                 </article>
               ) : transcriptDisplayText ? (
                 <article className={`slide-text-item ${recordingState === 'recording' ? 'is-live' : ''}`}>
@@ -2380,7 +2605,7 @@ function App() {
               type="button"
               className="slide-nav-button"
               disabled={!canGoPrev}
-              onClick={() => setActiveSlideIndex((prev) => Math.max(prev - 1, 0))}
+              onClick={() => navigateSlide('prev')}
               aria-label="Previous slide"
             >
               &larr;
@@ -2390,7 +2615,7 @@ function App() {
               type="button"
               className="slide-nav-button"
               disabled={!canGoNext}
-              onClick={() => setActiveSlideIndex((prev) => Math.min(prev + 1, totalSlides - 1))}
+              onClick={() => navigateSlide('next')}
               aria-label="Next slide"
             >
               &rarr;

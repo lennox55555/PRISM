@@ -1,16 +1,20 @@
 """
-llm processor service module.
-handles communication with large language models to generate svg code
-from natural language descriptions. this module is responsible for
-constructing prompts, managing context, and parsing llm responses.
-includes topic similarity detection for intelligent visualization updates.
-uses anthropic claude for svg generation and openai for embeddings.
+LLM processor service module using LangChain.
+Handles communication with large language models to generate SVG code,
+summaries, and other text processing tasks.
+Uses LangChain for unified interface, retry logic, and fallbacks.
 """
 
 import logging
 import re
 import time
 from typing import Any, Optional, Tuple
+
+from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.prompts import ChatPromptTemplate, PromptTemplate
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.runnables import RunnableWithFallbacks
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 from app.config import get_settings
 from app.models.schemas import SVGGenerationRequest, SVGGenerationResponse
@@ -19,176 +23,383 @@ logger = logging.getLogger(__name__)
 settings = get_settings()
 
 
-def _is_claude_model(model: str) -> bool:
-    """Check if the model is a Claude model."""
-    return model.startswith("claude")
+# ============================================================================
+# PROMPTS
+# ============================================================================
 
+SVG_SYSTEM_PROMPT = """Generate a simple SVG visualization. Keep it MINIMAL and FAST.
 
-# prompt for checking topic similarity between two text segments
-TOPIC_SIMILARITY_PROMPT = """you are a topic similarity analyzer. compare the two text segments below and determine if they are about the same general topic or theme.
+RULES:
+- Under 1500 characters total
+- viewBox="0 0 800 600"
+- 3-5 simple shapes max
+- 1 title, 2-3 labels
+- Solid colors only (no gradients)
+- English text only
 
-respond with exactly one of these two options:
-- "SIMILAR" - if the texts share the same general topic, theme, or subject matter (even if details differ)
-- "DIFFERENT" - if the texts are about distinctly different topics or themes
+Output ONLY raw SVG code. No explanations."""
 
-examples:
-- "a red car driving fast" vs "a blue sports car on a highway" = SIMILAR (both about cars)
-- "a beautiful sunset over mountains" vs "cats playing with yarn" = DIFFERENT (nature scene vs animals)
-- "explaining machine learning algorithms" vs "neural networks and deep learning" = SIMILAR (both about AI/ML)
-- "cooking pasta with tomato sauce" vs "the history of ancient rome" = DIFFERENT (cooking vs history)
+SUMMARY_SYSTEM_PROMPT = """You are an educational slide summarizer.
 
-text 1: {text1}
+Convert live transcript chunks into concise, classroom-style slide notes.
 
-text 2: {text2}
+IMPORTANT: All output MUST be in English only.
 
-your response (SIMILAR or DIFFERENT):"""
-
-# system prompt that instructs the llm on how to generate svg code
-# this prompt is crucial for getting consistent, valid svg output
-SVG_SYSTEM_PROMPT = """you are an expert svg visualization generator. your task is to create clean,
-valid svg code based on natural language descriptions. follow these guidelines:
-
-1. always output valid svg code that can be rendered in a browser
-2. use a viewbox of "0 0 400 300" unless the description requires different dimensions
-3. include descriptive comments in the svg to explain each element
-4. use semantic grouping with <g> elements where appropriate
-5. apply appropriate colors, gradients, and styles to make visualizations appealing
-6. keep the svg code clean and well-formatted
-7. for abstract concepts, create metaphorical or symbolic visualizations
-8. for data descriptions, create appropriate charts or diagrams
-9. always include a background element for context
-
-output format:
-- start with <svg> tag
-- end with </svg> tag
-- do not include any explanation outside the svg tags
-- the svg must be self-contained and not reference external resources
-
-examples of visualizations you might create:
-- bar charts, line graphs, pie charts for data
-- flowcharts and diagrams for processes
-- icons and symbols for objects
-- scene illustrations for descriptions"""
-
-# prompt for grammar correction of transcribed speech
-GRAMMAR_CORRECTION_PROMPT = """you are a grammar correction assistant. fix the grammar, punctuation, and clarity of the following transcribed speech while preserving the original meaning and intent.
-
-rules:
-- fix spelling, grammar, and punctuation errors
-- make sentences clear and well-structured
-- preserve the speaker's intent and meaning exactly
-- do not add new information or change the meaning
-- do not add filler words or expand on ideas
-- keep the same tone and style
-- output ONLY the corrected text, nothing else
-
-transcribed text to fix:
-{text}
-
-corrected text:"""
-
-# system prompt for live speech summaries shown in the slide notes panel
-SUMMARY_SYSTEM_PROMPT = """you are an educational slide summarizer.
-
-convert live transcript chunks into concise, classroom-style slide notes.
-
-output requirements:
-- return plain text only (no code blocks)
-- use exactly this structure:
+Output requirements:
+- Return plain text only (no code blocks)
+- All text must be in English
+- Use exactly this structure:
   Key Concepts
   - ...
   Key Details
   - ...
   Takeaways
   - ...
-- each bullet must be a direct educational statement
-- never use speaker-attribution wording such as:
+- Each bullet must be a direct educational statement
+- Never use speaker-attribution wording such as:
   "the user stated", "the speaker said", "according to the transcript"
-- focus on concepts, definitions, mechanisms, examples, and implications
-- keep bullets concise and information-dense
-- do not invent facts that were not present in the transcript"""
+- Focus on concepts, definitions, mechanisms, examples, and implications
+- Keep bullets concise and information-dense
+- Do not invent facts that were not present in the transcript"""
 
+GRAMMAR_SYSTEM_PROMPT = """You are a grammar correction assistant. Fix grammar, spelling, and punctuation.
+Output ONLY the corrected text in English, nothing else. Preserve the original meaning exactly."""
+
+ENHANCED_SVG_PROMPT_TEMPLATE = """Enhance and evolve this existing SVG visualization based on new details.
+
+EXISTING SVG CODE:
+{previous_svg}
+
+ORIGINAL DESCRIPTION:
+{previous_text}
+
+NEW DETAILS TO ADD:
+{new_text}
+
+INSTRUCTIONS:
+- Analyze the existing SVG structure and style
+- Keep the same visual theme, colors, and overall layout
+- Add new elements or modify existing ones to incorporate the new details
+- Maintain SVG validity and the same viewBox dimensions
+- Enhance details, add depth, or expand the scene based on new information
+- Output only the complete updated SVG code"""
+
+
+# ============================================================================
+# LLM PROCESSOR CLASS
+# ============================================================================
 
 class LLMProcessor:
     """
-    processor for generating svg visualizations using language models.
-    this class manages the interaction with the llm api and handles
-    prompt construction, response parsing, and error handling.
+    Processor for generating SVG visualizations and text processing using LangChain.
+    Provides unified interface with automatic retries, fallbacks, and error handling.
     """
 
     def __init__(self, model: Optional[str] = None):
         """
-        initialize the llm processor with the specified model.
+        Initialize the LLM processor with LangChain models.
 
-        args:
-            model: model identifier, defaults to settings.llm_model
+        Args:
+            model: Model identifier, defaults to settings.llm_model
         """
         self.model = model or settings.llm_model
-        self.client = None  # primary llm client used for svg generation
-        self.claude_client = None  # dedicated anthropic client for claude tasks
-        self.openai_client = None  # openai client for embeddings
-        self._initialize_client()
+        self.claude_model = None
+        self.openai_model = None
+        self.openai_embeddings = None
+        self.output_parser = StrOutputParser()
+        self._initialize_models()
 
-    def _initialize_client(self):
-        """
-        initialize the llm clients.
-        uses anthropic for claude models (svg generation) and openai for embeddings.
-        """
-        # initialize anthropic client independently so summaries can always use claude
+    def _initialize_models(self):
+        """Initialize LangChain models with proper configuration."""
+        # Initialize Claude model for SVG generation
         try:
-            import anthropic
+            from langchain_anthropic import ChatAnthropic
 
             if settings.claude_key:
-                self.claude_client = anthropic.AsyncAnthropic(api_key=settings.claude_key)
+                self.claude_model = ChatAnthropic(
+                    model=self.model if self.model.startswith("claude") else "claude-sonnet-4-6",
+                    api_key=settings.claude_key,
+                    max_tokens=2048,  # Minimal for fast SVGs
+                    temperature=0.7,
+                    max_retries=3,
+                )
+                logger.info(f"LangChain Claude model initialized: {self.model}")
             else:
-                logger.warning("claude key missing, claude features unavailable")
-        except ImportError:
-            logger.warning("anthropic package not installed, claude unavailable")
-            self.claude_client = None
+                logger.warning("Claude API key not configured")
+        except ImportError as e:
+            logger.warning(f"langchain-anthropic not installed: {e}")
+        except Exception as e:
+            logger.error(f"Failed to initialize Claude model: {e}")
 
-        # initialize the primary generation client
-        if _is_claude_model(self.model):
-            self.client = self.claude_client
-            if self.client:
-                logger.info(f"llm processor initialized with claude model: {self.model}")
-            else:
-                logger.warning("claude model selected but claude client unavailable")
-        else:
-            # fallback to openai for non-claude models
-            try:
-                from openai import AsyncOpenAI
-
-                self.client = AsyncOpenAI(api_key=settings.openai_api_key)
-                logger.info(f"llm processor initialized with openai model: {self.model}")
-            except ImportError:
-                logger.warning("openai package not installed, llm processor unavailable")
-                self.client = None
-
-        # always initialize openai client for embeddings (claude doesn't have embeddings api)
+        # Initialize OpenAI model for fallback and utilities
         try:
-            from openai import AsyncOpenAI
+            from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 
-            self.openai_client = AsyncOpenAI(api_key=settings.openai_api_key)
-        except ImportError:
-            logger.warning("openai package not installed, embeddings unavailable")
-            self.openai_client = None
+            if settings.openai_api_key:
+                self.openai_model = ChatOpenAI(
+                    model="gpt-4o-mini",
+                    api_key=settings.openai_api_key,
+                    max_tokens=2048,  # Minimal for fast SVGs
+                    temperature=0.7,
+                    max_retries=3,
+                )
+                self.openai_embeddings = OpenAIEmbeddings(
+                    model="text-embedding-3-small",
+                    api_key=settings.openai_api_key,
+                )
+                logger.info("LangChain OpenAI models initialized")
+            else:
+                logger.warning("OpenAI API key not configured")
+        except ImportError as e:
+            logger.warning(f"langchain-openai not installed: {e}")
+        except Exception as e:
+            logger.error(f"Failed to initialize OpenAI models: {e}")
 
-    def _extract_text_from_claude_response(self, content: list[Any]) -> str:
+    def _get_primary_model(self):
+        """Get the primary model based on configuration."""
+        if self.model.startswith("claude") and self.claude_model:
+            return self.claude_model
+        elif self.openai_model:
+            return self.openai_model
+        return None
+
+    def _get_model_with_fallback(self):
+        """Get model with fallback chain for reliability."""
+        primary = self._get_primary_model()
+        if primary and self.openai_model and primary != self.openai_model:
+            # Create fallback chain: primary -> openai
+            return primary.with_fallbacks([self.openai_model])
+        elif primary:
+            return primary
+        elif self.openai_model:
+            return self.openai_model
+        return None
+
+    def _extract_svg(self, response_text: str) -> str:
+        """Extract SVG code from LLM response, handling truncated responses."""
+        # First try to find complete SVG
+        svg_pattern = r"<svg[\s\S]*?</svg>"
+        match = re.search(svg_pattern, response_text, re.IGNORECASE)
+        if match:
+            return match.group(0)
+
+        # Check if SVG was truncated (has opening but no closing tag)
+        svg_start = re.search(r"<svg[^>]*>", response_text, re.IGNORECASE)
+        if svg_start:
+            logger.warning("SVG appears truncated (no closing tag), attempting to repair...")
+            # Extract from <svg> to end and close any open tags
+            svg_content = response_text[svg_start.start():]
+            # Close the SVG tag
+            if "</svg>" not in svg_content.lower():
+                svg_content = svg_content.rstrip() + "\n</svg>"
+            logger.info(f"Repaired truncated SVG, length: {len(svg_content)}")
+            return svg_content
+
+        logger.warning(f"No SVG tags found in LLM response. Response preview: {response_text[:500]}...")
+        return response_text
+
+    def _create_fallback_svg(self, text: str, error: str) -> str:
+        """Create a fallback SVG when generation fails."""
+        escaped_text = text[:50].replace("<", "&lt;").replace(">", "&gt;")
+        escaped_error = str(error)[:100].replace("<", "&lt;").replace(">", "&gt;")
+
+        return f"""<svg viewBox="0 0 400 300" xmlns="http://www.w3.org/2000/svg">
+  <rect width="400" height="300" fill="#f8f9fa" stroke="#dee2e6" stroke-width="2"/>
+  <text x="200" y="130" text-anchor="middle" font-family="system-ui" font-size="14" fill="#6c757d">
+    Unable to generate visualization
+  </text>
+  <text x="200" y="160" text-anchor="middle" font-family="system-ui" font-size="12" fill="#adb5bd">
+    Input: {escaped_text}...
+  </text>
+  <text x="200" y="190" text-anchor="middle" font-family="system-ui" font-size="10" fill="#dc3545">
+    {escaped_error}
+  </text>
+</svg>"""
+
+    def _cosine_similarity(self, vec1: list[float], vec2: list[float]) -> float:
+        """Calculate cosine similarity between two vectors."""
+        import math
+        dot_product = sum(a * b for a, b in zip(vec1, vec2))
+        magnitude1 = math.sqrt(sum(a * a for a in vec1))
+        magnitude2 = math.sqrt(sum(b * b for b in vec2))
+        if magnitude1 == 0 or magnitude2 == 0:
+            return 0.0
+        return dot_product / (magnitude1 * magnitude2)
+
+    async def check_topic_similarity(
+        self,
+        text1: str,
+        text2: str,
+        threshold: float = 0.75
+    ) -> Tuple[bool, float]:
         """
-        extract plain text from anthropic message content blocks.
-        """
-        text_blocks = []
-        for block in content:
-            block_text = getattr(block, "text", None)
-            if block_text:
-                text_blocks.append(block_text)
+        Check if two text segments are about the same topic using embeddings.
+        Uses LangChain OpenAI embeddings for semantic similarity.
 
-        return "\n".join(text_blocks).strip()
+        Args:
+            text1: First text segment
+            text2: Second text segment
+            threshold: Similarity threshold (0-1)
+
+        Returns:
+            Tuple of (is_similar: bool, similarity_score: float)
+        """
+        if not self.openai_embeddings:
+            # Fallback: simple word overlap
+            words1 = set(text1.lower().split())
+            words2 = set(text2.lower().split())
+            overlap = len(words1 & words2) / max(len(words1 | words2), 1)
+            return overlap > 0.3, overlap
+
+        try:
+            # Use LangChain embeddings
+            embeddings = await self.openai_embeddings.aembed_documents([text1, text2])
+            similarity = self._cosine_similarity(embeddings[0], embeddings[1])
+            is_similar = similarity >= threshold
+
+            logger.info(
+                f"Topic similarity: '{text1[:30]}...' vs '{text2[:30]}...' "
+                f"= {similarity:.3f} ({'SIMILAR' if is_similar else 'DIFFERENT'})"
+            )
+            return is_similar, similarity
+
+        except Exception as e:
+            logger.error(f"Embedding similarity check error: {e}")
+            # Fallback to word overlap
+            words1 = set(text1.lower().split())
+            words2 = set(text2.lower().split())
+            overlap = len(words1 & words2) / max(len(words1 | words2), 1)
+            return overlap > 0.3, overlap
+
+    async def generate_svg(self, request: SVGGenerationRequest) -> SVGGenerationResponse:
+        """
+        Generate an SVG visualization from text description using LangChain.
+
+        Args:
+            request: SVG generation request with text and options
+
+        Returns:
+            SVG generation response containing the SVG code and metadata
+        """
+        model = self._get_model_with_fallback()
+        if not model:
+            logger.warning("No LLM model available, returning mock response")
+            return await self._generate_mock_svg(request)
+
+        try:
+            # Build prompt
+            prompt_parts = [f"Create a detailed SVG visualization for: {request.text}"]
+            if request.style:
+                prompt_parts.append(f"Style preferences: {request.style}")
+            if request.context:
+                prompt_parts.append(f"Additional context: {request.context}")
+            user_prompt = "\n".join(prompt_parts)
+
+            # Create messages
+            messages = [
+                SystemMessage(content=SVG_SYSTEM_PROMPT),
+                HumanMessage(content=user_prompt),
+            ]
+
+            # Invoke with retry built into LangChain
+            logger.info(f"[SVG_LLM] ========== SVG GENERATION START ==========")
+            logger.info(f"[SVG_LLM] Model: {model}")
+            logger.info(f"[SVG_LLM] Prompt: {user_prompt}")
+            response = await model.ainvoke(messages)
+            logger.info(f"[SVG_LLM] ========== FULL RESPONSE ==========")
+            logger.info(f"[SVG_LLM] Response content:\n{response.content}")
+            logger.info(f"[SVG_LLM] ========== END RESPONSE ==========")
+            svg_code = self._extract_svg(response.content)
+            logger.info(f"[SVG_LLM] Extracted SVG length: {len(svg_code)}, starts with <svg: {svg_code.strip().startswith('<svg')}")
+
+            return SVGGenerationResponse(
+                svg_code=svg_code,
+                description=f"Visualization generated for: {request.text}",
+                original_text=request.text,
+            )
+
+        except Exception as e:
+            logger.error(f"SVG generation error: {e}", exc_info=True)
+            return SVGGenerationResponse(
+                svg_code=self._create_fallback_svg(request.text, str(e)),
+                description=f"Error generating visualization: {e}",
+                original_text=request.text,
+            )
+
+    async def generate_enhanced_svg(
+        self,
+        previous_text: str,
+        new_text: str,
+        previous_svg: Optional[str] = None,
+        style: Optional[str] = None
+    ) -> SVGGenerationResponse:
+        """
+        Generate an enhanced SVG that builds upon a previous visualization.
+
+        Args:
+            previous_text: Text from the previous visualization
+            new_text: New text to incorporate
+            previous_svg: The actual SVG code from the previous generation
+            style: Optional style preferences
+
+        Returns:
+            SVG generation response with enhanced visualization
+        """
+        model = self._get_model_with_fallback()
+        if not model:
+            combined_text = f"{previous_text} {new_text}"
+            return await self._generate_mock_svg(
+                SVGGenerationRequest(text=combined_text, style=style)
+            )
+
+        try:
+            if previous_svg:
+                prompt = ENHANCED_SVG_PROMPT_TEMPLATE.format(
+                    previous_svg=previous_svg,
+                    previous_text=previous_text,
+                    new_text=new_text,
+                )
+            else:
+                prompt = f"""Create an enhanced SVG visualization that evolves and builds upon the existing concept.
+
+Previous context: {previous_text}
+New details: {new_text}
+
+Instructions:
+- Maintain the core visual theme from the previous context
+- Add, enhance, or evolve elements based on the new details
+- Create a cohesive visualization that combines both contexts"""
+
+            if style:
+                prompt += f"\nStyle preferences: {style}"
+
+            messages = [
+                SystemMessage(content=SVG_SYSTEM_PROMPT),
+                HumanMessage(content=prompt),
+            ]
+
+            response = await model.ainvoke(messages)
+            svg_code = self._extract_svg(response.content)
+            combined_text = f"{previous_text} + {new_text}"
+
+            logger.info(f"Enhanced SVG generated (with previous_svg: {previous_svg is not None})")
+
+            return SVGGenerationResponse(
+                svg_code=svg_code,
+                description=f"Enhanced visualization: {new_text}",
+                original_text=combined_text,
+            )
+
+        except Exception as e:
+            logger.error(f"Enhanced SVG generation error: {e}")
+            return SVGGenerationResponse(
+                svg_code=self._create_fallback_svg(new_text, str(e)),
+                description=f"Error generating enhanced visualization: {e}",
+                original_text=new_text,
+            )
 
     def _strip_attribution_phrases(self, text: str) -> str:
-        """
-        remove narration/speaker-attribution phrasing from summary lines.
-        """
+        """Remove narration/speaker-attribution phrasing from summary lines."""
         attribution_patterns = [
             r"\b(the )?(user|speaker|presenter)\s+"
             r"(stated|states|said|says|mentioned|mentions|noted|notes|"
@@ -208,9 +419,7 @@ class LLMProcessor:
         return normalized
 
     def _format_structured_slide_summary(self, bullets: list[str]) -> str:
-        """
-        force a stable slide-friendly structure with fixed sections.
-        """
+        """Format bullets into structured slide summary."""
         normalized_unique: list[str] = []
         seen: set[str] = set()
 
@@ -254,9 +463,7 @@ class LLMProcessor:
         return "\n".join(output_lines)
 
     def _normalize_summary(self, summary_text: str, fallback: str) -> str:
-        """
-        normalize summary output into slide-friendly bullet formatting.
-        """
+        """Normalize summary output into slide-friendly bullet formatting."""
         cleaned = summary_text.strip()
         if not cleaned:
             return fallback
@@ -273,32 +480,18 @@ class LLMProcessor:
         normalized_bullets: list[str] = []
 
         for line in lines:
-            line_text = line
-            if heading_pattern.match(line_text):
+            if heading_pattern.match(line):
                 continue
 
-            line_match = bullet_pattern.match(line_text)
-            line_candidates: list[str]
+            line_match = bullet_pattern.match(line)
             if line_match:
-                line_candidates = [line_text[line_match.end():]]
+                normalized_bullets.append(line[line_match.end():])
             else:
-                # split prose lines into sentence-level bullets
-                line_candidates = re.split(r"(?<=[.!?])\s+", line_text)
-
-            for candidate in line_candidates:
-                cleaned_candidate = self._strip_attribution_phrases(candidate)
-                if cleaned_candidate:
-                    normalized_bullets.append(cleaned_candidate)
-
-        # if we could not parse lines into useful bullets, split prose into sentence bullets
-        if not normalized_bullets:
-            sentence_candidates = re.split(r"(?<=[.!?])\s+", " ".join(lines))
-            normalized_bullets = [
-                self._strip_attribution_phrases(sentence.strip())
-                for sentence in sentence_candidates
-                if sentence.strip()
-            ]
-            normalized_bullets = [bullet for bullet in normalized_bullets if bullet]
+                candidates = re.split(r"(?<=[.!?])\s+", line)
+                for candidate in candidates:
+                    cleaned_candidate = self._strip_attribution_phrases(candidate)
+                    if cleaned_candidate:
+                        normalized_bullets.append(cleaned_candidate)
 
         bullets = normalized_bullets[:9]
         if not bullets:
@@ -307,15 +500,12 @@ class LLMProcessor:
         return self._format_structured_slide_summary(bullets)
 
     def _build_fallback_summary(self, cleaned: list[str]) -> str:
-        """
-        deterministic fallback summary used when llm summarization fails.
-        """
+        """Build deterministic fallback summary when LLM fails."""
         if not cleaned:
             return self._format_structured_slide_summary(
                 ["No transcript content is available yet."]
             )
 
-        # build fallback bullets from recent transcript sentences
         recent_text = " ".join(cleaned[-5:])
         sentence_candidates = re.split(r"(?<=[.!?])\s+", recent_text)
         bullets = [
@@ -329,219 +519,10 @@ class LLMProcessor:
 
         return self._format_structured_slide_summary(bullets)
 
-    def _build_prompt(self, request: SVGGenerationRequest) -> str:
-        """
-        construct the user prompt from the generation request.
-        combines the text description with any additional context or style preferences.
-
-        args:
-            request: svg generation request containing text and options
-
-        returns:
-            formatted prompt string for the llm
-        """
-        prompt_parts = [f"create an svg visualization for: {request.text}"]
-
-        if request.style:
-            prompt_parts.append(f"style preferences: {request.style}")
-
-        if request.context:
-            prompt_parts.append(f"additional context: {request.context}")
-
-        return "\n".join(prompt_parts)
-
-    def _extract_svg(self, response_text: str) -> str:
-        """
-        extract svg code from the llm response.
-        handles cases where the llm includes additional text outside the svg tags.
-
-        args:
-            response_text: raw text response from the llm
-
-        returns:
-            extracted svg code, or the original text if no svg tags found
-        """
-        # pattern to match svg content including the tags
-        svg_pattern = r"<svg[\s\S]*?</svg>"
-        match = re.search(svg_pattern, response_text, re.IGNORECASE)
-
-        if match:
-            return match.group(0)
-
-        # if no svg tags found, return the response as-is
-        # this allows for debugging when the llm doesn't follow the format
-        logger.warning("no svg tags found in llm response, returning raw response")
-        return response_text
-
-    def _create_fallback_svg(self, text: str, error: str) -> str:
-        """
-        create a fallback svg when generation fails.
-        displays an error message in a styled svg format.
-
-        args:
-            text: original text that failed to generate
-            error: error message to display
-
-        returns:
-            svg code containing the error message
-        """
-        # escape special characters for svg text content
-        escaped_text = text[:50].replace("<", "&lt;").replace(">", "&gt;")
-        escaped_error = str(error)[:100].replace("<", "&lt;").replace(">", "&gt;")
-
-        return f"""<svg viewBox="0 0 400 300" xmlns="http://www.w3.org/2000/svg">
-  <!-- fallback svg displayed when generation fails -->
-  <rect width="400" height="300" fill="#f8f9fa" stroke="#dee2e6" stroke-width="2"/>
-  <text x="200" y="130" text-anchor="middle" font-family="system-ui" font-size="14" fill="#6c757d">
-    unable to generate visualization
-  </text>
-  <text x="200" y="160" text-anchor="middle" font-family="system-ui" font-size="12" fill="#adb5bd">
-    input: {escaped_text}...
-  </text>
-  <text x="200" y="190" text-anchor="middle" font-family="system-ui" font-size="10" fill="#dc3545">
-    {escaped_error}
-  </text>
-</svg>"""
-
-    def _cosine_similarity(self, vec1: list[float], vec2: list[float]) -> float:
-        """
-        calculate cosine similarity between two vectors.
-
-        args:
-            vec1: first embedding vector
-            vec2: second embedding vector
-
-        returns:
-            cosine similarity score between 0 and 1
-        """
-        import math
-
-        dot_product = sum(a * b for a, b in zip(vec1, vec2))
-        magnitude1 = math.sqrt(sum(a * a for a in vec1))
-        magnitude2 = math.sqrt(sum(b * b for b in vec2))
-
-        if magnitude1 == 0 or magnitude2 == 0:
-            return 0.0
-
-        return dot_product / (magnitude1 * magnitude2)
-
-    async def check_topic_similarity(
-        self,
-        text1: str,
-        text2: str,
-        threshold: float = 0.75
-    ) -> Tuple[bool, float]:
-        """
-        check if two text segments are about the same topic using embeddings.
-        uses openai embeddings for fast semantic similarity comparison.
-        much faster and cheaper than using a full llm call.
-
-        args:
-            text1: first text segment (previous visualization text)
-            text2: second text segment (new text)
-            threshold: similarity threshold (0-1), above this is considered similar
-
-        returns:
-            tuple of (is_similar: bool, similarity_score: float)
-        """
-        if not self.openai_client:
-            # fallback: simple word overlap check when openai client not available
-            words1 = set(text1.lower().split())
-            words2 = set(text2.lower().split())
-            overlap = len(words1 & words2) / max(len(words1 | words2), 1)
-            return overlap > 0.3, overlap
-
-        try:
-            # use openai embeddings model for fast similarity check
-            # text-embedding-3-small is fast and cost-effective
-            response = await self.openai_client.embeddings.create(
-                model="text-embedding-3-small",
-                input=[text1, text2],
-            )
-
-            # extract embeddings
-            embedding1 = response.data[0].embedding
-            embedding2 = response.data[1].embedding
-
-            # calculate cosine similarity
-            similarity = self._cosine_similarity(embedding1, embedding2)
-            is_similar = similarity >= threshold
-
-            logger.info(
-                f"topic similarity (embeddings): '{text1[:30]}...' vs '{text2[:30]}...' "
-                f"= {similarity:.3f} ({'SIMILAR' if is_similar else 'DIFFERENT'})"
-            )
-
-            return is_similar, similarity
-
-        except Exception as e:
-            logger.error(f"embedding similarity check error: {e}")
-            # fallback to simple word overlap on error
-            words1 = set(text1.lower().split())
-            words2 = set(text2.lower().split())
-            overlap = len(words1 & words2) / max(len(words1 | words2), 1)
-            return overlap > 0.3, overlap
-
-    async def generate_svg(self, request: SVGGenerationRequest) -> SVGGenerationResponse:
-        """
-        generate an svg visualization from the given text description.
-        sends the prompt to the llm and processes the response.
-
-        args:
-            request: svg generation request with text and options
-
-        returns:
-            svg generation response containing the svg code and metadata
-        """
-        if not self.client:
-            logger.warning("llm client not initialized, returning mock response")
-            return await self._generate_mock_svg(request)
-
-        try:
-            prompt = self._build_prompt(request)
-
-            if _is_claude_model(self.model):
-                # use anthropic api for claude models
-                response = await self.client.messages.create(
-                    model=self.model,
-                    max_tokens=2000,
-                    system=SVG_SYSTEM_PROMPT,
-                    messages=[
-                        {"role": "user", "content": prompt},
-                    ],
-                )
-                svg_code = self._extract_svg(response.content[0].text)
-            else:
-                # use openai api for other models
-                response = await self.client.chat.completions.create(
-                    model=self.model,
-                    messages=[
-                        {"role": "system", "content": SVG_SYSTEM_PROMPT},
-                        {"role": "user", "content": prompt},
-                    ],
-                    temperature=0.7,
-                    max_tokens=2000,
-                )
-                svg_code = self._extract_svg(response.choices[0].message.content)
-
-            return SVGGenerationResponse(
-                svg_code=svg_code,
-                description=f"visualization generated for: {request.text}",
-                original_text=request.text,
-            )
-
-        except Exception as e:
-            logger.error(f"llm generation error: {e}")
-            return SVGGenerationResponse(
-                svg_code=self._create_fallback_svg(request.text, str(e)),
-                description=f"error generating visualization: {e}",
-                original_text=request.text,
-            )
-
     async def generate_brief_summary_with_debug(self, texts: list[str]) -> dict[str, Any]:
         """
-        generate a concise live summary and return debug metadata.
-        prioritizes claude for summaries and falls back gracefully.
+        Generate a concise live summary using LangChain with debug metadata.
+        Uses Claude as primary with OpenAI fallback.
         """
         cleaned = [text.strip() for text in texts if text and text.strip()]
         input_characters = sum(len(text) for text in cleaned)
@@ -557,7 +538,6 @@ class LLMProcessor:
                 "elapsed_ms": 0,
             }
 
-        # keep input bounded for fast summarization
         snippets = cleaned[:40]
         formatted_text = "\n".join(
             f"{idx + 1}. {snippet[:700]}" for idx, snippet in enumerate(snippets)
@@ -570,20 +550,26 @@ class LLMProcessor:
             f"{formatted_text}"
         )
 
-        # primary path: claude
-        if self.claude_client:
+        messages = [
+            SystemMessage(content=SUMMARY_SYSTEM_PROMPT),
+            HumanMessage(content=prompt),
+        ]
+
+        # Try Claude first
+        if self.claude_model:
             started = time.perf_counter()
             try:
-                response = await self.claude_client.messages.create(
+                # Use a faster model for summaries
+                from langchain_anthropic import ChatAnthropic
+                summary_model = ChatAnthropic(
                     model=settings.summary_llm_model,
+                    api_key=settings.claude_key,
                     max_tokens=500,
                     temperature=0.2,
-                    system=SUMMARY_SYSTEM_PROMPT,
-                    messages=[
-                        {"role": "user", "content": prompt},
-                    ],
+                    max_retries=2,
                 )
-                raw_summary = self._extract_text_from_claude_response(response.content)
+                response = await summary_model.ainvoke(messages)
+                raw_summary = response.content
                 summary = self._normalize_summary(raw_summary, fallback_summary)
                 elapsed_ms = int((time.perf_counter() - started) * 1000)
 
@@ -596,22 +582,22 @@ class LLMProcessor:
                     "elapsed_ms": elapsed_ms,
                 }
             except Exception as e:
-                logger.error(f"claude summary generation error: {e}")
+                logger.error(f"Claude summary error: {e}")
 
-        # secondary fallback: openai (if available)
-        if self.openai_client:
+        # Fallback to OpenAI
+        if self.openai_model:
             started = time.perf_counter()
             try:
-                response = await self.openai_client.chat.completions.create(
+                from langchain_openai import ChatOpenAI
+                summary_model = ChatOpenAI(
                     model="gpt-4o-mini",
-                    messages=[
-                        {"role": "system", "content": SUMMARY_SYSTEM_PROMPT},
-                        {"role": "user", "content": prompt},
-                    ],
-                    temperature=0.2,
+                    api_key=settings.openai_api_key,
                     max_tokens=320,
+                    temperature=0.2,
+                    max_retries=2,
                 )
-                raw_summary = (response.choices[0].message.content or "").strip()
+                response = await summary_model.ainvoke(messages)
+                raw_summary = response.content
                 summary = self._normalize_summary(raw_summary, fallback_summary)
                 elapsed_ms = int((time.perf_counter() - started) * 1000)
 
@@ -619,14 +605,15 @@ class LLMProcessor:
                     "summary": summary,
                     "provider": "openai",
                     "model": "gpt-4o-mini",
-                    "fallback_used": False,
+                    "fallback_used": True,
                     "input_characters": input_characters,
                     "elapsed_ms": elapsed_ms,
                 }
             except Exception as e:
-                logger.error(f"openai summary generation fallback error: {e}")
+                logger.error(f"OpenAI summary error: {e}")
 
-        logger.warning("summary generation falling back to deterministic formatter")
+        # Final fallback
+        logger.warning("Summary generation falling back to deterministic formatter")
         return {
             "summary": fallback_summary,
             "provider": "fallback",
@@ -637,282 +624,98 @@ class LLMProcessor:
         }
 
     async def generate_brief_summary(self, texts: list[str]) -> str:
-        """
-        generate a short summary from user speech/text segments.
-        """
+        """Generate a short summary from user speech/text segments."""
         summary_payload = await self.generate_brief_summary_with_debug(texts)
         return str(summary_payload["summary"])
 
     async def correct_grammar(self, text: str) -> str:
         """
-        correct grammar and punctuation for a sentence or short text segment.
-        uses a fast model for low-latency correction.
-
-        args:
-            text: raw transcribed text to correct
-
-        returns:
-            grammar-corrected text
+        Correct grammar and punctuation using LangChain.
+        Uses a fast model for low-latency correction.
         """
-        if not text or not text.strip():
+        if not text or not text.strip() or len(text) < 5:
             return text
 
-        text = text.strip()
-
-        # skip very short text (likely incomplete)
-        if len(text) < 5:
-            return text
-
-        # use openai for fast grammar correction (gpt-4o-mini is fast and cheap)
-        if not self.openai_client:
+        model = self.openai_model  # Use OpenAI for fast grammar correction
+        if not model:
             return text
 
         try:
-            response = await self.openai_client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[
-                    {
-                        "role": "system",
-                        "content": "You are a grammar correction assistant. Fix grammar, spelling, and punctuation. Output ONLY the corrected text, nothing else. Preserve the original meaning exactly.",
-                    },
-                    {
-                        "role": "user",
-                        "content": text,
-                    },
-                ],
-                temperature=0.1,
-                max_tokens=500,
-            )
+            messages = [
+                SystemMessage(content=GRAMMAR_SYSTEM_PROMPT),
+                HumanMessage(content=text.strip()),
+            ]
+            response = await model.ainvoke(messages)
+            corrected = response.content.strip()
 
-            corrected = (response.choices[0].message.content or "").strip()
             if not corrected:
                 return text
 
-            logger.debug(f"grammar corrected: '{text[:50]}...' -> '{corrected[:50]}...'")
+            logger.debug(f"Grammar corrected: '{text[:50]}...' -> '{corrected[:50]}...'")
             return corrected
 
         except Exception as e:
-            logger.error(f"grammar correction error: {e}")
+            logger.error(f"Grammar correction error: {e}")
             return text
 
-    async def generate_enhanced_svg(
-        self,
-        previous_text: str,
-        new_text: str,
-        previous_svg: Optional[str] = None,
-        style: Optional[str] = None
-    ) -> SVGGenerationResponse:
-        """
-        generate an enhanced svg that builds upon a previous visualization.
-        when previous_svg is provided, the llm can see the actual svg code
-        and make more intelligent, targeted enhancements.
-
-        args:
-            previous_text: text from the previous visualization
-            new_text: new text to incorporate
-            previous_svg: the actual svg code from the previous generation
-            style: optional style preferences
-
-        returns:
-            svg generation response with enhanced visualization
-        """
-        if not self.client:
-            logger.warning("llm client not initialized, returning mock response")
-            combined_text = f"{previous_text} {new_text}"
-            return await self._generate_mock_svg(
-                SVGGenerationRequest(text=combined_text, style=style)
-            )
-
-        try:
-            # build the enhanced prompt with svg code if available
-            if previous_svg:
-                # include the actual svg so the llm can see and modify it
-                enhanced_prompt = f"""enhance and evolve this existing svg visualization based on new details.
-
-EXISTING SVG CODE:
-{previous_svg}
-
-ORIGINAL DESCRIPTION:
-{previous_text}
-
-NEW DETAILS TO ADD:
-{new_text}
-
-INSTRUCTIONS:
-- analyze the existing svg structure and style
-- keep the same visual theme, colors, and overall layout
-- add new elements or modify existing ones to incorporate the new details
-- maintain svg validity and the same viewbox dimensions
-- enhance details, add depth, or expand the scene based on new information
-- output only the complete updated svg code
-"""
-            else:
-                # fallback to text-only prompt if no svg provided
-                enhanced_prompt = f"""create an enhanced svg visualization that evolves and builds upon the existing concept.
-
-previous context (base visualization theme):
-{previous_text}
-
-new details to incorporate:
-{new_text}
-
-instructions:
-- maintain the core visual theme from the previous context
-- add, enhance, or evolve elements based on the new details
-- create a cohesive visualization that combines both contexts
-- make the visualization more detailed and refined than a fresh start
-- if new details add specificity, incorporate those specific elements
-"""
-
-            if style:
-                enhanced_prompt += f"\nstyle preferences: {style}"
-
-            if _is_claude_model(self.model):
-                # use anthropic api for claude models
-                response = await self.client.messages.create(
-                    model=self.model,
-                    max_tokens=2000,
-                    system=SVG_SYSTEM_PROMPT,
-                    messages=[
-                        {"role": "user", "content": enhanced_prompt},
-                    ],
-                )
-                svg_code = self._extract_svg(response.content[0].text)
-            else:
-                # use openai api for other models
-                response = await self.client.chat.completions.create(
-                    model=self.model,
-                    messages=[
-                        {"role": "system", "content": SVG_SYSTEM_PROMPT},
-                        {"role": "user", "content": enhanced_prompt},
-                    ],
-                    temperature=0.7,
-                    max_tokens=2000,
-                )
-                svg_code = self._extract_svg(response.choices[0].message.content)
-
-            combined_text = f"{previous_text} + {new_text}"
-
-            logger.info(f"enhanced svg generated (with previous_svg: {previous_svg is not None})")
-
-            return SVGGenerationResponse(
-                svg_code=svg_code,
-                description=f"enhanced visualization: {new_text}",
-                original_text=combined_text,
-            )
-
-        except Exception as e:
-            logger.error(f"enhanced svg generation error: {e}")
-            return SVGGenerationResponse(
-                svg_code=self._create_fallback_svg(new_text, str(e)),
-                description=f"error generating enhanced visualization: {e}",
-                original_text=new_text,
-            )
-
-    async def _generate_mock_svg(
-        self, request: SVGGenerationRequest
-    ) -> SVGGenerationResponse:
-        """
-        generate a mock svg for testing without api access.
-        creates a simple svg that displays the input text.
-
-        args:
-            request: svg generation request
-
-        returns:
-            mock svg response
-        """
+    async def _generate_mock_svg(self, request: SVGGenerationRequest) -> SVGGenerationResponse:
+        """Generate a mock SVG for testing without API access."""
         escaped_text = request.text[:60].replace("<", "&lt;").replace(">", "&gt;")
 
         mock_svg = f"""<svg viewBox="0 0 400 300" xmlns="http://www.w3.org/2000/svg">
-  <!-- mock visualization for development and testing -->
   <defs>
     <linearGradient id="bgGradient" x1="0%" y1="0%" x2="100%" y2="100%">
       <stop offset="0%" style="stop-color:#667eea;stop-opacity:1" />
       <stop offset="100%" style="stop-color:#764ba2;stop-opacity:1" />
     </linearGradient>
   </defs>
-
-  <!-- background with gradient -->
   <rect width="400" height="300" fill="url(#bgGradient)"/>
-
-  <!-- decorative circles -->
   <circle cx="50" cy="50" r="30" fill="rgba(255,255,255,0.1)"/>
   <circle cx="350" cy="250" r="50" fill="rgba(255,255,255,0.1)"/>
-  <circle cx="200" cy="150" r="80" fill="rgba(255,255,255,0.05)"/>
-
-  <!-- main text display -->
   <text x="200" y="140" text-anchor="middle" font-family="system-ui" font-size="16" fill="white" font-weight="bold">
-    mock visualization
+    Mock Visualization
   </text>
   <text x="200" y="170" text-anchor="middle" font-family="system-ui" font-size="12" fill="rgba(255,255,255,0.8)">
     {escaped_text}
   </text>
-
-  <!-- status indicator -->
   <text x="200" y="270" text-anchor="middle" font-family="system-ui" font-size="10" fill="rgba(255,255,255,0.6)">
-    configure openai api key for real generation
+    Configure API keys for real generation
   </text>
 </svg>"""
 
         return SVGGenerationResponse(
             svg_code=mock_svg,
-            description="mock visualization (api not configured)",
+            description="Mock visualization (API not configured)",
             original_text=request.text,
         )
 
-    async def generate_svg_streaming(
-        self, request: SVGGenerationRequest
-    ):
+    async def generate_svg_streaming(self, request: SVGGenerationRequest):
         """
-        generate svg with streaming response.
-        yields partial svg content as it is generated by the llm.
-        useful for showing progress during generation.
-
-        args:
-            request: svg generation request
-
-        yields:
-            chunks of svg code as they are generated
+        Generate SVG with streaming response.
+        Yields partial SVG content as it is generated.
         """
-        if not self.client:
+        model = self._get_model_with_fallback()
+        if not model:
             yield await self._generate_mock_svg(request)
             return
 
         try:
-            prompt = self._build_prompt(request)
+            prompt_parts = [f"Create an SVG visualization for: {request.text}"]
+            if request.style:
+                prompt_parts.append(f"Style preferences: {request.style}")
+            user_prompt = "\n".join(prompt_parts)
 
-            if _is_claude_model(self.model):
-                # use anthropic streaming api for claude models
-                async with self.client.messages.stream(
-                    model=self.model,
-                    max_tokens=2000,
-                    system=SVG_SYSTEM_PROMPT,
-                    messages=[
-                        {"role": "user", "content": prompt},
-                    ],
-                ) as stream:
-                    async for text in stream.text_stream:
-                        yield text
-            else:
-                # use openai streaming api for other models
-                stream = await self.client.chat.completions.create(
-                    model=self.model,
-                    messages=[
-                        {"role": "system", "content": SVG_SYSTEM_PROMPT},
-                        {"role": "user", "content": prompt},
-                    ],
-                    temperature=0.7,
-                    max_tokens=2000,
-                    stream=True,
-                )
+            messages = [
+                SystemMessage(content=SVG_SYSTEM_PROMPT),
+                HumanMessage(content=user_prompt),
+            ]
 
-                async for chunk in stream:
-                    if chunk.choices[0].delta.content:
-                        content = chunk.choices[0].delta.content
-                        yield content
+            # Use LangChain streaming
+            async for chunk in model.astream(messages):
+                if hasattr(chunk, 'content') and chunk.content:
+                    yield chunk.content
 
         except Exception as e:
-            logger.error(f"streaming generation error: {e}")
+            logger.error(f"Streaming generation error: {e}")
             fallback = self._create_fallback_svg(request.text, str(e))
             yield fallback

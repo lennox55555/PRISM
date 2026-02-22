@@ -27,9 +27,17 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 # trigger word to activate visualization
-# "prison" is included as it's often misheard for "prism"
-ACTIVATE_WORDS = ["prism", "prison"]
-# deactivation phrase to stop visualization
+# includes common misrecognitions from speech-to-text
+ACTIVATE_WORDS = [
+    "prism", "prison", "prisons", "prizm", "présume", "presume",
+    "pris", "prysm", "prisim", "priszm", "preson", "presom"
+]
+# deactivation phrases - includes common variations
+DEACTIVATE_PHRASES = [
+    "thank you", "thankyou", "thanks", "thank u", "thankful",
+    "thanking you", "thank ya", "thanks you", "think you"
+]
+# legacy single phrase for backwards compatibility
 DEACTIVATE_PHRASE = "thank you"
 
 
@@ -125,40 +133,21 @@ class AudioSessionHandler:
         self.visualization_text = ""  # text accumulated since visualization started
         self.just_activated = False  # flag to prevent immediate deactivation in same chunk
 
-        # topic tracking for intelligent visualization updates
-        # stores the text that was used for the last svg generation
-        self.last_svg_text = ""
-        # stores the full context used for the last svg (for enhanced mode)
-        self.last_svg_context = ""
-        # stores the actual svg code from the last generation (for enhancement)
-        self.last_svg_code = ""
-        # stores the length of text at last svg generation (to extract delta)
-        self.last_text_length = 0
-        # similarity threshold for determining if topics match (0-1)
-        # lower = more lenient (topics considered similar more often)
-        self.similarity_threshold = 0.35
+        # flag to notify frontend that a new session just started (for clearing text)
+        self.just_started_new_session = False
 
-        # cross-session tracking - preserved between prism sessions for comparison
-        # when a new session starts, we compare first chunk to this
-        self.previous_session_svg_text = ""
-        self.previous_session_svg_code = ""
-        self.previous_session_svg_context = ""
-        # flag to track if we're on the first generation of a new session
-        # only the first generation does similarity check against previous session
-        self.is_first_generation_of_session = True
-
-        # session visualization type - once set, stick with it for the entire session
-        # None = not yet determined, "chart" or "svg"
+        # session visualization type - "chart" or "svg", determined when generating
         self.session_visualization_type: Optional[str] = None
-        # for chart sessions, store the last chart data for context
-        self.last_chart_text = ""
+
+        # track if we've generated a visualization in this session
+        # first generation = "initial", subsequent = "enhanced" (versions on same slide)
+        self.has_generated_in_session = False
+        # unique session ID to help frontend group all visualizations from same session
+        self.visualization_session_id: Optional[str] = None
 
         # audio buffer for accumulating wav chunks from frontend
         self.audio_chunks: list[bytes] = []
         self.last_svg_generation_time = 0
-
-        # timing configuration (in seconds)
-        self.svg_generation_interval = 5  # generate svg every 5 seconds
 
         # background task for periodic svg generation
         self.processing_task: Optional[asyncio.Task] = None
@@ -192,11 +181,6 @@ class AudioSessionHandler:
         self.accumulated_text = ""
         self.visualization_active = False
         self.visualization_text = ""
-        # reset topic tracking for new session
-        self.last_svg_text = ""
-        self.last_svg_context = ""
-        self.last_svg_code = ""
-        self.last_text_length = 0
         self.audio_chunks = []
         self.last_svg_generation_time = time.time()
         self.stt_service.reset()
@@ -234,7 +218,7 @@ class AudioSessionHandler:
 
         # generate final svg if visualization was active and has text
         if self.visualization_active and self.visualization_text.strip():
-            await self._generate_and_send_visualization()
+            await self._generate_and_send_visualization(force=True)
 
         self.visualization_active = False
 
@@ -270,8 +254,8 @@ class AudioSessionHandler:
 
     async def _periodic_svg_generation(self):
         """
-        background task that periodically generates svg.
-        runs while recording is active and visualization is enabled.
+        Background task that generates visualization every 4 seconds.
+        Provides intermediate results while user is speaking.
         """
         try:
             while self.is_recording and self.is_connected:
@@ -279,17 +263,18 @@ class AudioSessionHandler:
 
                 current_time = time.time()
 
-                # only generate svg if visualization is active
+                # generate every 4 seconds if visualization is active
                 if self.visualization_active:
-                    if current_time - self.last_svg_generation_time >= self.svg_generation_interval:
+                    if current_time - self.last_svg_generation_time >= 4:
                         if self.visualization_text.strip():
+                            logger.info("[PERIODIC] Generating intermediate visualization...")
                             await self._generate_and_send_visualization()
                             self.last_svg_generation_time = current_time
 
         except asyncio.CancelledError:
-            logger.info("periodic svg generation task cancelled")
+            logger.info("periodic task cancelled")
         except Exception as e:
-            logger.error(f"periodic svg generation error: {e}")
+            logger.error(f"periodic task error: {e}")
 
     async def _transcribe_audio(self, audio_data: bytes):
         """
@@ -316,7 +301,8 @@ class AudioSessionHandler:
 
                 # IMPORTANT: Check for deactivation phrase BEFORE filtering hallucinations
                 # "thank you" is a common hallucination but also our deactivation phrase
-                if self.visualization_active and lower_text_check in ["thank you", "thankyou", "thanks"]:
+                is_deactivate_phrase = any(phrase in lower_text_check for phrase in DEACTIVATE_PHRASES)
+                if self.visualization_active and is_deactivate_phrase:
                     # This is the deactivation phrase, process it normally
                     logger.info(f"detected deactivation phrase: {text}")
                 else:
@@ -356,6 +342,10 @@ class AudioSessionHandler:
                     await self._correct_new_sentences()
 
                 # send transcription to client
+                # include new_session flag to tell frontend to clear text
+                new_session_flag = self.just_started_new_session
+                self.just_started_new_session = False  # clear after sending
+
                 await self.send_message_safe(
                     WebSocketMessage(
                         type=MessageType.TRANSCRIPTION_PARTIAL,
@@ -364,10 +354,13 @@ class AudioSessionHandler:
                             "accumulated_text": self.accumulated_text,
                             "visualization_text": self._get_visualization_text_for_generation(),
                             "visualization_active": self.visualization_active,
+                            "new_session": new_session_flag,
                             "is_final": False,
                         },
                     ),
                 )
+                if new_session_flag:
+                    logger.info(f"[TRIGGER] Sent new_session=True with transcription")
                 logger.info(f"transcribed: {text}")
 
         except Exception as e:
@@ -382,7 +375,7 @@ class AudioSessionHandler:
     async def _process_trigger_word(self, text: str) -> str:
         """
         check for activation/deactivation words and update visualization state.
-        - "prism" or "prison" activates visualization (when off)
+        - "prism" activates visualization OR starts a new session if already active
         - "thank you" deactivates visualization (when on)
         returns the text with trigger words removed and "prison" replaced with "prism".
 
@@ -399,28 +392,42 @@ class AudioSessionHandler:
         text = re.sub(r'\bprison\b', 'prism', text, flags=re.IGNORECASE)
         lower_text = text.lower()
 
+        logger.info(f"[TRIGGER] Processing text: '{text[:100]}...' | visualization_active={self.visualization_active}")
+
         # check for deactivation phrase first (when visualization is active)
-        # also check for "thankyou" without space as speech recognition sometimes merges it
+        # uses DEACTIVATE_PHRASES list which includes common speech-to-text variations
         # require at least 6 seconds after activation before allowing deactivation
         # this ensures at least one SVG has time to generate
-        deactivate_patterns = [DEACTIVATE_PHRASE, "thankyou", "thanks"]
+        deactivate_patterns = DEACTIVATE_PHRASES
         found_deactivate = None
 
         time_since_activation = time.time() - self.last_svg_generation_time
         can_deactivate = time_since_activation >= 6  # minimum 6 seconds before deactivation
 
+        logger.info(f"[TRIGGER] Time since last generation: {time_since_activation:.1f}s | can_deactivate={can_deactivate}")
+
         if can_deactivate:
             for pattern in deactivate_patterns:
                 if pattern in lower_text:
                     found_deactivate = pattern
+                    logger.info(f"[TRIGGER] Found deactivation phrase: '{pattern}'")
                     break
 
         if self.visualization_active and found_deactivate:
+            logger.info(f"[TRIGGER] >>> VISUALIZATION STOPPING (phrase: {found_deactivate}, after {time_since_activation:.1f}s)")
+
+            # IMPORTANT: Generate final visualization BEFORE deactivating
+            # This ensures we always produce output even if periodic generation hasn't fired yet
+            if self.visualization_text.strip():
+                logger.info(f"[TRIGGER] Generating FINAL visualization before deactivation...")
+                await self._generate_and_send_visualization(force=True)
+                logger.info(f"[TRIGGER] Final visualization generated successfully")
+
             self.visualization_active = False
             self.just_activated = False
-            # Clear visualization text to prevent any pending generations
+            # Clear visualization text after final generation
             self.visualization_text = ""
-            logger.info(f"visualization STOPPED (deactivation phrase: {found_deactivate}, after {time_since_activation:.1f}s)")
+            logger.info(f"[TRIGGER] >>> VISUALIZATION STOPPED")
 
             # send status update to client
             await self.send_message_safe(
@@ -436,58 +443,60 @@ class AudioSessionHandler:
             # don't return any text - we don't want to add anything after deactivation
             return ""
 
-        # check for activation words (when visualization is not active)
-        if not self.visualization_active:
-            for activate_word in ACTIVATE_WORDS:
-                if activate_word in lower_text:
-                    self.visualization_active = True
+        # check for activation words
+        # NOW: Also trigger new session if prism is said while already active!
+        found_activate = None
+        for activate_word in ACTIVATE_WORDS:
+            if activate_word in lower_text:
+                found_activate = activate_word
+                break
 
-                    # preserve previous session's SVG data for cross-session comparison
-                    # only save if we had a previous session with actual SVG
-                    if self.last_svg_code:
-                        self.previous_session_svg_text = self.last_svg_text
-                        self.previous_session_svg_code = self.last_svg_code
-                        self.previous_session_svg_context = self.last_svg_context
+        if found_activate:
+            was_active = self.visualization_active
+            self.visualization_active = True
 
-                    # clear per-session tracking for fresh start
-                    self.visualization_text = ""
-                    self.last_svg_text = ""
-                    self.last_svg_context = ""
-                    self.last_svg_code = ""
-                    self.last_text_length = 0
-                    self.last_svg_generation_time = time.time()
-                    self.last_chart_text = ""
+            # clear for fresh start
+            self.visualization_text = ""
+            self.last_svg_generation_time = time.time()
 
-                    # reset grammar correction tracking
-                    self.corrected_visualization_text = ""
-                    self.last_corrected_length = 0
+            # reset grammar correction tracking
+            self.corrected_visualization_text = ""
+            self.last_corrected_length = 0
 
-                    # mark this as the first generation of a new session
-                    # the first generation will compare against previous session
-                    self.is_first_generation_of_session = True
-                    # reset visualization type - will be determined on first generation
-                    self.session_visualization_type = None
+            # reset visualization type - will be determined on generation
+            self.session_visualization_type = None
+            # reset generation tracking - first generation will be "initial", rest will be "enhanced"
+            self.has_generated_in_session = False
+            # create unique session ID for this prism->thank you session
+            # all visualizations in this session will share this ID for grouping
+            self.visualization_session_id = f"session_{int(time.time() * 1000)}"
+            # flag to tell frontend to clear text
+            self.just_started_new_session = True
 
-                    logger.info(f"visualization STARTED (trigger word: {activate_word})")
+            logger.info(f"[TRIGGER] >>> VISUALIZATION STARTED (trigger: {found_activate}, was_active={was_active})")
 
-                    # send status update to client
-                    await self.send_message_safe(
-                        WebSocketMessage(
-                            type=MessageType.STATUS,
-                            data={
-                                "status": "visualization_toggled",
-                                "visualization_active": self.visualization_active,
-                            },
-                        ),
-                    )
+            # send status update to client
+            await self.send_message_safe(
+                WebSocketMessage(
+                    type=MessageType.STATUS,
+                    data={
+                        "status": "visualization_toggled",
+                        "visualization_active": self.visualization_active,
+                        "new_session": True,  # signal that this is a new session
+                    },
+                ),
+            )
 
-                    # return text after the trigger word (use "prism" for splitting since prison->prism)
-                    parts = re.split(r'\bprism\b', lower_text, flags=re.IGNORECASE)
-                    if len(parts) > 1:
-                        return parts[1].strip()
-                    return ""
+            # return text after the trigger word (use "prism" for splitting since prison->prism)
+            parts = re.split(r'\bprism\b', lower_text, flags=re.IGNORECASE)
+            if len(parts) > 1:
+                after_prism = parts[1].strip()
+                logger.info(f"[TRIGGER] Text after prism: '{after_prism[:50]}...'")
+                return after_prism
+            return ""
 
         # no trigger word found, return original text (with prison->prism replacement)
+        logger.info(f"[TRIGGER] No trigger found, returning text as-is")
         return text
 
     async def _correct_new_sentences(self):
@@ -564,57 +573,30 @@ class AudioSessionHandler:
 
         return raw_text
 
-    async def _generate_and_send_visualization(self):
+    async def _generate_and_send_visualization(self, force: bool = False):
         """
-        generate visualization from the text (svg or chart).
-        first checks if the request is for a chart/analytical visualization.
-        - charts: always generate new (no similarity check), use matplotlib
-        - svg: use topic similarity to enhance or create new visualizations
-        sends the result to the client.
+        Generate ONE visualization from all accumulated text.
+        Called only when user says 'thank you' to end the session.
+        Each prism->thank you session = one visualization.
         """
-        # check if visualization is still active (may have been deactivated)
-        if not self.visualization_active:
-            logger.info("visualization generation skipped - deactivated")
-            return
-
         # use grammar-corrected text when available
         current_text = self._get_visualization_text_for_generation().strip()
         if not current_text or not self.is_connected:
+            logger.info("No text to visualize or not connected")
             return
 
         try:
-            # extract only the NEW text since last generation
-            new_text_delta = current_text[self.last_text_length:].strip()
+            logger.info(f"[VIZ] Generating visualization for: '{current_text[:100]}...'")
 
-            # if no new text, skip generation
-            if not new_text_delta and self.last_svg_text:
-                logger.info("no new text since last generation, skipping")
-                return
+            # detect if this should be a chart or SVG
+            is_chart, chart_confidence = await self.chart_generator.is_chart_request(current_text)
 
-            # use full text if this is the first generation
-            if not new_text_delta:
-                new_text_delta = current_text
-
-            # determine visualization type for this session
-            # once set, stick with it for the entire prism->thank you session
-            if self.session_visualization_type is None:
-                # first generation - detect type and lock it in
-                is_chart, chart_confidence = await self.chart_generator.is_chart_request(current_text)
-                if is_chart:
-                    self.session_visualization_type = "chart"
-                    logger.info(f"session visualization type set to: chart (confidence: {chart_confidence:.2f})")
-                else:
-                    self.session_visualization_type = "svg"
-                    logger.info("session visualization type set to: svg")
-
-            # use the locked-in type for this session
-            if self.session_visualization_type == "chart":
-                # generate/regenerate chart with full accumulated text
-                _, chart_confidence = await self.chart_generator.is_chart_request(current_text)
-                await self._generate_and_send_chart(current_text, current_text, chart_confidence)
+            if is_chart:
+                logger.info(f"[VIZ] Generating CHART (confidence: {chart_confidence:.2f})")
+                await self._generate_and_send_chart(current_text, chart_confidence)
             else:
-                # generate svg
-                await self._generate_and_send_svg(new_text_delta, current_text)
+                logger.info(f"[VIZ] Generating SVG")
+                await self._generate_and_send_svg(current_text)
 
         except Exception as e:
             logger.error(f"visualization generation error: {e}")
@@ -626,40 +608,30 @@ class AudioSessionHandler:
                 ),
             )
 
-    async def _generate_and_send_chart(self, new_text_delta: str, current_text: str, confidence: float):
+    async def _generate_and_send_chart(self, text: str, confidence: float):
         """
-        generate a matplotlib chart visualization.
-        within a session, charts are regenerated with full accumulated context
-        to "enhance" them as more data comes in.
+        Generate a matplotlib chart visualization.
+        First generation = "chart" (new slide)
+        Subsequent generations = "enhanced" (version on same slide)
 
         args:
-            new_text_delta: the new text to visualize
-            current_text: full accumulated text
+            text: the full text to visualize
             confidence: confidence that this is a chart request
         """
-        # determine if this is initial or enhanced chart
-        is_enhanced = bool(self.last_chart_text)
-        generation_mode = "enhanced" if is_enhanced else "chart"
+        # determine generation mode
+        generation_mode = "chart" if not self.has_generated_in_session else "enhanced"
+        logger.info(f"[CHART] Generating chart (mode: {generation_mode}) for: '{text[:50]}...'")
 
-        if is_enhanced:
-            logger.info(f"enhancing chart with full context: {current_text[:50]}...")
-        else:
-            logger.info(f"generating initial chart (confidence: {confidence:.2f}) for: {current_text[:50]}...")
-
-        # always use full accumulated text for charts (gives more context for better charts)
-        result = await self.chart_generator.generate_chart(current_text)
+        result = await self.chart_generator.generate_chart(text)
 
         if result["error"]:
             logger.error(f"chart generation failed: {result['error']}")
             # fall back to svg generation
-            await self._generate_and_send_svg(new_text_delta, current_text)
+            await self._generate_and_send_svg(text)
             return
 
-        # update tracking
-        self.last_chart_text = current_text
-        self.last_svg_text = current_text
-        self.last_text_length = len(current_text)
-        self.last_svg_context = current_text
+        # mark that we've generated in this session
+        self.has_generated_in_session = True
 
         # send chart to client
         await self.send_message_safe(
@@ -669,117 +641,35 @@ class AudioSessionHandler:
                     "image": result["image"],  # base64 png
                     "code": result["code"],  # matplotlib code
                     "description": result["description"],
-                    "original_text": current_text,
-                    "new_text_delta": new_text_delta,
+                    "original_text": text,
                     "generation_mode": generation_mode,
+                    "session_id": self.visualization_session_id,
                     "chart_confidence": round(confidence, 3),
                 },
             ),
         )
-        logger.info("chart generated and sent")
+        logger.info(f"[CHART] Chart generated and sent (mode: {generation_mode})")
 
-    async def _generate_and_send_svg(self, new_text_delta: str, current_text: str):
+    async def _generate_and_send_svg(self, text: str):
         """
-        generate svg visualization.
-
-        within a single prism->thank you session:
-        - only ONE visualization that gets continuously enhanced
-        - no similarity checks within session
-        - uses full accumulated text for more context
-
-        when starting a new session (saying prism again):
-        - compares FIRST chunk against previous session's text
-        - if similar: continues editing previous session's image
-        - if different: creates new image
-        - subsequent chunks always enhance (no similarity checks)
+        Generate SVG visualization from the text.
+        First generation = "initial" (new slide)
+        Subsequent generations in same session = "enhanced" (version on same slide)
 
         args:
-            new_text_delta: the new text since last generation
-            current_text: full accumulated text
+            text: the full text to visualize
         """
         try:
-            # track similarity info for the response
-            similarity_score = None
-            generation_mode = "initial"
+            # determine generation mode based on whether we've already generated in this session
+            generation_mode = "initial" if not self.has_generated_in_session else "enhanced"
+            logger.info(f"[SVG] Generating SVG (mode: {generation_mode}) for: '{text[:80]}...'")
 
-            if self.is_first_generation_of_session:
-                # FIRST generation of this session - check against previous session
-                self.is_first_generation_of_session = False
+            # generate SVG
+            request = SVGGenerationRequest(text=text)
+            response = await self.llm_processor.generate_svg(request)
 
-                if self.previous_session_svg_code:
-                    # we have a previous session - compare against it
-                    is_similar, similarity_score = await self.llm_processor.check_topic_similarity(
-                        self.previous_session_svg_text,
-                        current_text,  # compare full first chunk text
-                        threshold=self.similarity_threshold
-                    )
-
-                    logger.info(
-                        f"comparing new session: '{current_text[:50]}...' "
-                        f"vs previous session: '{self.previous_session_svg_text[:50]}...' "
-                        f"= {similarity_score:.3f}"
-                    )
-
-                    if is_similar:
-                        # similar to previous session - continue editing that image
-                        logger.info(
-                            f"new session similar to previous (score: {similarity_score:.3f}), "
-                            f"continuing previous session's visualization"
-                        )
-                        response = await self.llm_processor.generate_enhanced_svg(
-                            previous_text=self.previous_session_svg_context,
-                            new_text=current_text,
-                            previous_svg=self.previous_session_svg_code,
-                        )
-                        generation_mode = "enhanced"
-                        self.last_svg_context = current_text
-                        # carry over the previous session's SVG as our base
-                        self.last_svg_code = self.previous_session_svg_code
-                    else:
-                        # different topic - create fresh visualization
-                        logger.info(
-                            f"new session different from previous (score: {similarity_score:.3f}), "
-                            f"creating new visualization"
-                        )
-                        request = SVGGenerationRequest(text=current_text)
-                        response = await self.llm_processor.generate_svg(request)
-                        generation_mode = "new_topic"
-                        self.last_svg_context = current_text
-                else:
-                    # no previous session - create initial visualization
-                    logger.info(f"generating initial svg (no previous session): {current_text[:50]}...")
-                    request = SVGGenerationRequest(text=current_text)
-                    response = await self.llm_processor.generate_svg(request)
-                    generation_mode = "initial"
-                    self.last_svg_context = current_text
-            else:
-                # SUBSEQUENT generation within same session - ALWAYS enhance
-                # no similarity check - just keep building on the same visualization
-                if self.last_svg_code:
-                    # we have a previous SVG to enhance
-                    logger.info(
-                        f"enhancing within session with full context: {current_text[:50]}..."
-                    )
-                    response = await self.llm_processor.generate_enhanced_svg(
-                        previous_text=self.last_svg_context,
-                        new_text=current_text,  # use FULL accumulated text for more context
-                        previous_svg=self.last_svg_code,
-                    )
-                    generation_mode = "enhanced"
-                    self.last_svg_context = current_text
-                else:
-                    # no previous SVG yet - create initial one
-                    logger.info(f"generating initial svg (no previous in session): {current_text[:50]}...")
-                    request = SVGGenerationRequest(text=current_text)
-                    response = await self.llm_processor.generate_svg(request)
-                    generation_mode = "initial"
-                    self.last_svg_context = current_text
-
-            # update tracking for next generation
-            self.last_svg_text = current_text  # store full text for cross-session comparison
-            self.last_text_length = len(current_text)
-            # store the raw svg code for use in future enhancements
-            self.last_svg_code = response.svg_code
+            # mark that we've generated in this session
+            self.has_generated_in_session = True
 
             # process and sanitize the svg
             processed_svg = self.svg_generator.process_svg(
@@ -793,22 +683,20 @@ class AudioSessionHandler:
                 processed_svg, animation_type="fade"
             )
 
-            # send to client with full text and similarity info
+            # send to client
             await self.send_message_safe(
                 WebSocketMessage(
                     type=MessageType.SVG_GENERATED,
                     data={
                         "svg": animated_svg,
                         "description": response.description,
-                        "original_text": response.original_text,
-                        "new_text_delta": new_text_delta,  # the new text being compared
+                        "original_text": text,
                         "generation_mode": generation_mode,
-                        "similarity_score": round(similarity_score, 3) if similarity_score is not None else None,
-                        "similarity_threshold": self.similarity_threshold,
+                        "session_id": self.visualization_session_id,
                     },
                 ),
             )
-            logger.info(f"svg generated and sent (mode: {generation_mode}, similarity: {similarity_score})")
+            logger.info(f"[SVG] SVG generated and sent successfully")
 
         except Exception as e:
             logger.error(f"svg generation error: {e}")
