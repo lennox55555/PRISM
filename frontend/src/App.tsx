@@ -104,11 +104,8 @@ function getSlideItemLabel(item: SlideRenderItem): string {
 }
 
 function getSessionShortLabel(name: string): string {
-  const match = name.match(/(\d+)$/);
-  if (match) {
-    return `S${match[1]}`;
-  }
-  return name.charAt(0).toUpperCase();
+  const trimmed = name.trim();
+  return (trimmed.charAt(0) || 'S').toUpperCase();
 }
 
 function getLowestUnusedPositiveNumber(values: number[]): number {
@@ -701,12 +698,16 @@ function App() {
         </div>
 
         <div className="board-sidebar-footer">
+          <div className="board-brand-row">
+            <PrismLogo />
+            {!isSidebarCollapsed && (
+              <>
+                <p className="board-brand">PRISM</p>
+              </>
+            )}
+          </div>
           {!isSidebarCollapsed && (
             <>
-              <div className="board-brand-row">
-                <PrismLogo />
-                <p className="board-brand">PRISM</p>
-              </div>
               <button
                 type="button"
                 className="board-footer-link"
@@ -815,12 +816,7 @@ function App() {
         </section>
 
         <section className="board-controls">
-          <div className="control-start-text">
-            <p>Click To Start</p>
-            <p className="control-subtext">
-              {recordingState === 'idle' ? 'voice capture' : 'live transcription'}
-            </p>
-          </div>
+          <div className="control-start-text" aria-hidden="true" />
 
           <div className="control-recorder-wrap">
             <AudioRecorder

@@ -291,8 +291,20 @@ body {
 }
 
 .board-sidebar.is-collapsed .board-new-session {
+  width: 46px;
+  height: 46px;
+  min-height: 46px;
+  margin-left: auto;
+  margin-right: auto;
+  align-items: center;
   justify-content: center;
   padding: 0;
+}
+
+.board-sidebar.is-collapsed .new-session-plus {
+  margin: 0;
+  line-height: 1;
+  transform: translateY(-1px);
 }
 
 .board-session-list {
@@ -404,9 +416,34 @@ body {
   display: none;
 }
 
+.board-sidebar.is-collapsed .board-session-list {
+  align-items: center;
+}
+
 .board-sidebar.is-collapsed .board-session-item {
+  width: 46px;
+  min-height: 46px;
+  height: 46px;
   justify-content: center;
   padding: 0;
+}
+
+.board-sidebar.is-collapsed .session-label {
+  flex: 0 0 auto;
+  min-width: auto;
+  width: auto;
+  text-align: center;
+  overflow: visible;
+  font-size: 1rem;
+}
+
+.board-sidebar.is-collapsed .board-sidebar-footer {
+  display: flex;
+  justify-content: center;
+}
+
+.board-sidebar.is-collapsed .board-brand-row {
+  margin-bottom: 0;
 }
 
 .board-sidebar-footer {
@@ -456,8 +493,8 @@ body {
 }
 
 .board-main {
-  --board-content-width: 1160px;
-  --board-slide-height: 640px;
+  --board-content-width: 1200px;
+  --board-slide-height: 660px;
   flex: 1;
   min-width: 0;
   display: flex;
@@ -652,9 +689,9 @@ body {
 .board-controls {
   width: min(var(--board-content-width), 100%);
   flex: 0 0 auto;
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
   align-items: center;
-  justify-content: space-between;
   gap: 16px;
   min-height: 86px;
 }
@@ -677,12 +714,14 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
+  justify-self: center;
 }
 
 .control-statuses {
   display: flex;
   flex-direction: column;
   gap: 10px;
+  justify-self: end;
 }
 
 .control-status-row {
@@ -713,7 +752,7 @@ body {
 @media (max-width: 1200px) {
   .board-main {
     --board-content-width: 100%;
-    --board-slide-height: 600px;
+    --board-slide-height: 620px;
     padding: 18px;
   }
 
@@ -727,11 +766,14 @@ body {
   }
 
   .board-controls {
+    display: flex;
     flex-wrap: wrap;
     align-items: flex-start;
+    justify-content: center;
   }
 
   .control-statuses {
+    justify-self: auto;
     width: 100%;
   }
 }
@@ -757,7 +799,7 @@ body {
   }
 
   .board-main {
-    --board-slide-height: 520px;
+    --board-slide-height: 540px;
     padding: 12px;
     overflow: auto;
   }
