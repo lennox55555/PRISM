@@ -86,6 +86,7 @@ export interface AudioRecorderProps {
   onRecordingStateChange?: (state: RecordingState) => void;
   onRealtimeTranscript?: (text: string, isFinal: boolean) => void;
   onConnectionStateChange?: (state: ConnectionState) => void;
+  onStatusChange?: (status: string, data?: { visualization_active?: boolean; new_session?: boolean }) => void;
   compact?: boolean;
 }
 

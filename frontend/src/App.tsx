@@ -365,6 +365,7 @@ function App() {
   const [summaryError, setSummaryError] = useState<string | null>(null);
   const [summaryDebug, setSummaryDebug] = useState<LiveSummaryDebug | null>(null);
   const [pendingNewTopicNavigation, setPendingNewTopicNavigation] = useState(false);
+  const [pendingNavigationTargetIndex, setPendingNavigationTargetIndex] = useState<number | null>(null);
   const [slideAnimationClass, setSlideAnimationClass] = useState<'page-turn-left' | 'page-turn-right' | ''>('');
 
   const idCounterRef = useRef(0);
@@ -374,7 +375,9 @@ function App() {
   const lastSummarizedLengthRef = useRef(0);
   const hasRealtimeTranscriptRef = useRef(false);
   const liveSummaryRef = useRef(liveSummary);
-  // Track when we should navigate to a new slide (set when prism is said again after existing slides)
+  // Track if a previous prism session ended (thank you was said)
+  const previousSessionEndedRef = useRef(false);
+  // Track if we should navigate when the next new slide is created
   const shouldNavigateOnNewSlideRef = useRef(false);
 
   const transcriptionTextRef = useRef(transcriptionText);
@@ -791,26 +794,20 @@ function App() {
       lastCapturedTextLengthRef.current = transcriptionTextRef.current.length;
       const currentSummary = liveSummaryRef.current || undefined;
 
-      // Check BEFORE state update whether we'll be creating a new slide
-      const existingIndex = response.sessionId
-        ? notesHistoryRef.current.findIndex(item => item.sessionId === response.sessionId)
-        : -1;
-      const willCreateNewSlide = existingIndex === -1;
-
       // Use sessionId to find existing note from same prism session
       setNotesHistory((prev) => {
         // Look for existing note with same sessionId
-        const prevExistingIndex = response.sessionId
+        const existingIndex = response.sessionId
           ? prev.findIndex(item => item.sessionId === response.sessionId)
           : -1;
 
-        console.log('[SVG] Looking for sessionId:', response.sessionId, 'found at index:', prevExistingIndex);
+        console.log('[SVG] Looking for sessionId:', response.sessionId, 'found at index:', existingIndex);
 
-        if (prevExistingIndex !== -1) {
+        if (existingIndex !== -1) {
           // Found existing note with same sessionId - add as version
           console.log('[SVG] >>> ADDING VERSION to existing slide (sessionId match)');
           const updated = [...prev];
-          const existingItem = updated[prevExistingIndex];
+          const existingItem = updated[existingIndex];
           const existingVersions = existingItem.versions || [{
             svg: existingItem.svg,
             description: existingItem.description,
@@ -822,7 +819,7 @@ function App() {
           }];
 
           const newVersions = [...existingVersions, newVersion];
-          updated[prevExistingIndex] = {
+          updated[existingIndex] = {
             ...existingItem,
             svg: response.svg,
             description: response.description,
@@ -838,6 +835,18 @@ function App() {
         } else {
           // No existing note with this sessionId - create new slide
           console.log('[SVG] >>> CREATING NEW SLIDE (new sessionId)');
+          // If this is a new prism session (after thank you), navigate to the new slide
+          if (shouldNavigateOnNewSlideRef.current) {
+            console.log('[SVG] Triggering navigation to new slide (new prism session), target index:', prev.length);
+            shouldNavigateOnNewSlideRef.current = false;
+            // Track the index where this new slide will be (current length = new index)
+            const targetIndex = prev.length;
+            // Use setTimeout to ensure state update completes first
+            setTimeout(() => {
+              setPendingNavigationTargetIndex(targetIndex);
+              setPendingNewTopicNavigation(true);
+            }, 0);
+          }
           const newItem: NoteHistoryItem = {
             id: idCounterRef.current++,
             type: 'svg',
@@ -857,13 +866,6 @@ function App() {
           return [...prev, newItem];
         }
       });
-
-      // If we created a new slide and should navigate (new prism session with existing slides)
-      if (willCreateNewSlide && shouldNavigateOnNewSlideRef.current) {
-        console.log('[SVG] Triggering navigation to new slide');
-        shouldNavigateOnNewSlideRef.current = false;
-        setPendingNewTopicNavigation(true);
-      }
     }
 
     setIsGeneratingSVG(false);
@@ -891,25 +893,19 @@ function App() {
 
       lastCapturedTextLengthRef.current = transcriptionTextRef.current.length;
 
-      // Check BEFORE state update whether we'll be creating a new slide
-      const existingIndex = response.sessionId
-        ? notesHistoryRef.current.findIndex(item => item.sessionId === response.sessionId)
-        : -1;
-      const willCreateNewSlide = existingIndex === -1;
-
       // Use sessionId to find existing note from same prism session
       setNotesHistory((prev) => {
-        const prevExistingIndex = response.sessionId
+        const existingIndex = response.sessionId
           ? prev.findIndex(item => item.sessionId === response.sessionId)
           : -1;
 
-        console.log('[CHART] Looking for sessionId:', response.sessionId, 'found at index:', prevExistingIndex);
+        console.log('[CHART] Looking for sessionId:', response.sessionId, 'found at index:', existingIndex);
 
-        if (prevExistingIndex !== -1) {
+        if (existingIndex !== -1) {
           // Found existing note with same sessionId - add as version
           console.log('[CHART] >>> ADDING VERSION to existing slide');
           const updated = [...prev];
-          const existingItem = updated[prevExistingIndex];
+          const existingItem = updated[existingIndex];
           const existingVersions = existingItem.versions || [{
             chartImage: existingItem.chartImage,
             chartCode: existingItem.chartCode,
@@ -921,7 +917,7 @@ function App() {
           }];
 
           const newVersions = [...existingVersions, newVersion];
-          updated[prevExistingIndex] = {
+          updated[existingIndex] = {
             ...existingItem,
             chartImage: response.image,
             chartCode: response.code,
@@ -936,6 +932,17 @@ function App() {
         } else {
           // No existing note with this sessionId - create new slide
           console.log('[CHART] >>> CREATING NEW SLIDE');
+          // If this is a new prism session (after thank you), navigate to the new slide
+          if (shouldNavigateOnNewSlideRef.current) {
+            console.log('[CHART] Triggering navigation to new slide (new prism session), target index:', prev.length);
+            shouldNavigateOnNewSlideRef.current = false;
+            // Track the index where this new slide will be (current length = new index)
+            const targetIndex = prev.length;
+            setTimeout(() => {
+              setPendingNavigationTargetIndex(targetIndex);
+              setPendingNewTopicNavigation(true);
+            }, 0);
+          }
           const newItem: NoteHistoryItem = {
             id: idCounterRef.current++,
             type: 'chart',
@@ -955,13 +962,6 @@ function App() {
           return [...prev, newItem];
         }
       });
-
-      // If we created a new slide and should navigate (new prism session with existing slides)
-      if (willCreateNewSlide && shouldNavigateOnNewSlideRef.current) {
-        console.log('[CHART] Triggering navigation to new slide');
-        shouldNavigateOnNewSlideRef.current = false;
-        setPendingNewTopicNavigation(true);
-      }
     }
 
     setIsGeneratingSVG(false);
@@ -974,6 +974,15 @@ function App() {
   const handleError = useCallback((errorMessage: string) => {
     setError(errorMessage);
     setIsGeneratingSVG(false);
+  }, []);
+
+  // Handle status changes from backend (e.g., visualization_active toggle)
+  const handleStatusChange = useCallback((status: string, data?: { visualization_active?: boolean; new_session?: boolean }) => {
+    console.log('[STATUS] Received:', status, data);
+    if (typeof data?.visualization_active === 'boolean') {
+      console.log('[STATUS] Setting visualizationActive to:', data.visualization_active);
+      setVisualizationActive(data.visualization_active);
+    }
   }, []);
 
   // navigate between visualization versions (works for both SVGs and charts)
@@ -1974,7 +1983,7 @@ function App() {
     setActiveSlideIndex((prev) => Math.min(prev, Math.max(totalSlides - 1, 0)));
   }, [totalSlides]);
 
-  // track visualization session changes - only advance slide when NEW prism session starts
+  // track visualization session changes
   const prevVisualizationActiveRef = useRef(visualizationActive);
   useEffect(() => {
     // detect transition: visualization was OFF, now ON (new prism session started)
@@ -1984,17 +1993,19 @@ function App() {
       setTranscriptionText('');
       setLiveSummary('');
       lastCapturedTextLengthRef.current = 0;
-      // If there are existing slides, set flag to navigate when the new slide is created
-      // (not before, so we don't navigate to the old last slide)
-      if (notesHistory.length > 0) {
-        console.log('[PRISM] Will navigate to new slide when first visualization is created');
+      // If a previous session ended (thank you was said before), navigate to new slide when created
+      if (previousSessionEndedRef.current) {
+        console.log('[PRISM] Previous session ended, will navigate to new slide');
         shouldNavigateOnNewSlideRef.current = true;
+        previousSessionEndedRef.current = false;
       }
     } else if (!visualizationActive && prevVisualizationActiveRef.current) {
       console.log('[PRISM] === PRISM SESSION ENDED (thank you) ===');
+      // Mark that a session has ended - next prism will trigger navigation
+      previousSessionEndedRef.current = true;
     }
     prevVisualizationActiveRef.current = visualizationActive;
-  }, [visualizationActive, notesHistory.length]);
+  }, [visualizationActive]);
 
   // DON'T auto-advance during a session - removed the auto-advance on totalSlides change
   useEffect(() => {
@@ -2003,10 +2014,11 @@ function App() {
 
   // Auto-navigate to new page when new prism session starts
   useEffect(() => {
-    if (pendingNewTopicNavigation) {
+    if (pendingNewTopicNavigation && pendingNavigationTargetIndex !== null) {
       setPendingNewTopicNavigation(false);
-      // Navigate to the last slide (the newly created page) with animation
-      const targetIndex = slidePages.length - 1;
+      const targetIndex = pendingNavigationTargetIndex;
+      setPendingNavigationTargetIndex(null);
+      console.log('[NAV] Navigating to target index:', targetIndex);
       if (targetIndex >= 0) {
         setSlideAnimationClass('page-turn-left');
         setTimeout(() => {
@@ -2015,7 +2027,7 @@ function App() {
         }, 50);
       }
     }
-  }, [pendingNewTopicNavigation, slidePages]);
+  }, [pendingNewTopicNavigation, pendingNavigationTargetIndex]);
 
   const previousSessionIdRef = useRef(activeSessionId);
   useEffect(() => {
@@ -2570,6 +2582,7 @@ function App() {
               onError={handleError}
               onRecordingStateChange={handleRecordingStateChange}
               onRealtimeTranscript={handleRealtimeTranscript}
+              onStatusChange={handleStatusChange}
               compact
             />
           </div>
