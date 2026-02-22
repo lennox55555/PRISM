@@ -111,6 +111,30 @@ function getSessionShortLabel(name: string): string {
   return name.charAt(0).toUpperCase();
 }
 
+function getLowestUnusedPositiveNumber(values: number[]): number {
+  const used = new Set(values.filter((value) => Number.isInteger(value) && value > 0));
+  let candidate = 1;
+  while (used.has(candidate)) {
+    candidate += 1;
+  }
+  return candidate;
+}
+
+function getNextSessionName(sessions: Session[]): string {
+  const usedNumbers = sessions
+    .map((session) => {
+      const match = session.name.match(/^Session\s+(\d+)$/i);
+      return match ? Number(match[1]) : null;
+    })
+    .filter((value): value is number => value !== null && Number.isInteger(value) && value > 0);
+
+  return `Session ${getLowestUnusedPositiveNumber(usedNumbers)}`;
+}
+
+function getNextSessionId(sessions: Session[]): number {
+  return getLowestUnusedPositiveNumber(sessions.map((session) => session.id));
+}
+
 const THEME_STORAGE_KEY = 'board-ui-theme';
 
 const PrismLogo = () => (
@@ -139,9 +163,8 @@ function App() {
     { id: 1, name: 'Session 1', notes: [], transcriptionText: '' },
   ]);
   const [activeSessionId, setActiveSessionId] = useState(1);
-  const sessionCounterRef = useRef(1);
-
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
+  const [openSessionMenuId, setOpenSessionMenuId] = useState<number | null>(null);
 
   const [transcriptionText, setTranscriptionText] = useState('');
   const [realtimeTranscript, setRealtimeTranscript] = useState('');
@@ -157,6 +180,7 @@ function App() {
 
   const idCounterRef = useRef(0);
   const lastCapturedTextLengthRef = useRef(0);
+  const sessionMenuRef = useRef<HTMLDivElement | null>(null);
 
   const transcriptionTextRef = useRef(transcriptionText);
   const notesHistoryRef = useRef(notesHistory);
@@ -174,6 +198,22 @@ function App() {
       window.localStorage.setItem(THEME_STORAGE_KEY, isLightMode ? 'light' : 'dark');
     }
   }, [isLightMode]);
+
+  useEffect(() => {
+    if (openSessionMenuId === null) {
+      return;
+    }
+
+    const handleDocumentMouseDown = (event: MouseEvent) => {
+      const target = event.target as Node;
+      if (sessionMenuRef.current && !sessionMenuRef.current.contains(target)) {
+        setOpenSessionMenuId(null);
+      }
+    };
+
+    document.addEventListener('mousedown', handleDocumentMouseDown);
+    return () => document.removeEventListener('mousedown', handleDocumentMouseDown);
+  }, [openSessionMenuId]);
 
   useEffect(() => {
     if (recordingState !== 'recording') {
@@ -207,22 +247,25 @@ function App() {
   }, [recordingState, visualizationActive]);
 
   const handleNewSession = useCallback(() => {
+    const nextSessionId = getNextSessionId(sessions);
+    const nextSessionName = getNextSessionName(sessions);
+
     setSessions((prev) => prev.map((session) => (
       session.id === activeSessionId
         ? { ...session, notes: notesHistory, transcriptionText }
         : session
     )));
 
-    sessionCounterRef.current += 1;
     const newSession: Session = {
-      id: sessionCounterRef.current,
-      name: `Session ${sessionCounterRef.current}`,
+      id: nextSessionId,
+      name: nextSessionName,
       notes: [],
       transcriptionText: '',
     };
 
     setSessions((prev) => [newSession, ...prev]);
     setActiveSessionId(newSession.id);
+    setOpenSessionMenuId(null);
     setNotesHistory([]);
     setTranscriptionText('');
     setRealtimeTranscript('');
@@ -232,11 +275,10 @@ function App() {
     setActiveSlideIndex(0);
     idCounterRef.current = 0;
     lastCapturedTextLengthRef.current = 0;
-  }, [activeSessionId, notesHistory, transcriptionText]);
+  }, [activeSessionId, notesHistory, sessions, transcriptionText]);
 
-  const handleDeleteSession = useCallback((sessionId: number, event: React.MouseEvent) => {
-    event.stopPropagation();
-
+  const handleDeleteSession = useCallback((sessionId: number) => {
+    setOpenSessionMenuId(null);
     setSessions((prev) => {
       const filtered = prev.filter((session) => session.id !== sessionId);
 
@@ -247,7 +289,6 @@ function App() {
           notes: [],
           transcriptionText: '',
         };
-        sessionCounterRef.current = 1;
         setActiveSessionId(1);
         setNotesHistory([]);
         setTranscriptionText('');
@@ -260,11 +301,43 @@ function App() {
         setActiveSessionId(filtered[0].id);
         setNotesHistory(filtered[0].notes);
         setTranscriptionText(filtered[0].transcriptionText);
+        setRealtimeTranscript('');
+        setError(null);
+        setIsGeneratingSVG(false);
+        setActiveSlideIndex(0);
       }
 
       return filtered;
     });
   }, [activeSessionId]);
+
+  const handleRenameSession = useCallback((sessionId: number) => {
+    const target = sessions.find((session) => session.id === sessionId);
+    if (!target || typeof window === 'undefined') {
+      return;
+    }
+
+    const renamed = window.prompt('Rename session', target.name);
+    if (renamed === null) {
+      setOpenSessionMenuId(null);
+      return;
+    }
+
+    const trimmedName = renamed.trim();
+    if (!trimmedName) {
+      setOpenSessionMenuId(null);
+      return;
+    }
+
+    setSessions((prev) => prev.map((session) => (
+      session.id === sessionId ? { ...session, name: trimmedName } : session
+    )));
+    setOpenSessionMenuId(null);
+  }, [sessions]);
+
+  const handleTempPdf = useCallback(() => {
+    setOpenSessionMenuId(null);
+  }, []);
 
   const handleSwitchSession = useCallback((sessionId: number) => {
     setSessions((prev) => prev.map((session) => (
@@ -276,6 +349,7 @@ function App() {
     const targetSession = sessions.find((session) => session.id === sessionId);
     if (targetSession) {
       setActiveSessionId(sessionId);
+      setOpenSessionMenuId(null);
       setNotesHistory(targetSession.notes);
       setTranscriptionText(targetSession.transcriptionText);
       setRealtimeTranscript('');
@@ -572,16 +646,56 @@ function App() {
               <span className="session-label">
                 {isSidebarCollapsed ? getSessionShortLabel(session.name) : session.name}
               </span>
-              <button
-                type="button"
-                className="session-delete"
-                onClick={(event) => handleDeleteSession(session.id, event)}
-                aria-label={`Delete ${session.name}`}
-              >
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                  <path d="M3 6h18M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2" />
-                </svg>
-              </button>
+              {!isSidebarCollapsed && (
+                <div
+                  className="session-actions"
+                  ref={openSessionMenuId === session.id ? sessionMenuRef : undefined}
+                >
+                  <button
+                    type="button"
+                    className="session-menu-trigger"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      setOpenSessionMenuId((prev) => (prev === session.id ? null : session.id));
+                    }}
+                    aria-label={`Open menu for ${session.name}`}
+                  >
+                    ⋮
+                  </button>
+
+                  {openSessionMenuId === session.id && (
+                    <div
+                      className="session-menu"
+                      onClick={(event) => event.stopPropagation()}
+                    >
+                      <button
+                        type="button"
+                        className="session-menu-item"
+                        onClick={() => handleRenameSession(session.id)}
+                      >
+                        <span className="session-menu-icon" aria-hidden="true">✎</span>
+                        <span>Rename</span>
+                      </button>
+                      <button
+                        type="button"
+                        className="session-menu-item"
+                        onClick={handleTempPdf}
+                      >
+                        <span className="session-menu-icon" aria-hidden="true">📄</span>
+                        <span>Temp PDF</span>
+                      </button>
+                      <button
+                        type="button"
+                        className="session-menu-item is-delete"
+                        onClick={() => handleDeleteSession(session.id)}
+                      >
+                        <span className="session-menu-icon" aria-hidden="true">🗑</span>
+                        <span>Delete</span>
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           ))}
         </div>

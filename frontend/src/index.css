@@ -180,6 +180,11 @@ body {
   --session-active-border: #9adf8a;
   --session-text: #f2f2f2;
   --session-delete: #d7d7d7;
+  --session-menu-bg: #272727;
+  --session-menu-border: #4b4b4b;
+  --session-menu-hover: #3a3a3a;
+  --session-menu-text: #f3f3f3;
+  --session-menu-delete: #ff8b8b;
   --footer-link: #8ce07d;
   --slide-bg: #f3f3f3;
   --slide-shadow: 0 8px 30px rgba(0, 0, 0, 0.22);
@@ -207,6 +212,11 @@ body {
   --session-active-border: #76b06e;
   --session-text: #23324b;
   --session-delete: #3f5579;
+  --session-menu-bg: #ffffff;
+  --session-menu-border: #c8d4ec;
+  --session-menu-hover: #eef3fe;
+  --session-menu-text: #2b3b55;
+  --session-menu-delete: #d84b4b;
   --footer-link: #4cae63;
   --slide-bg: #ffffff;
   --slide-shadow: 0 8px 24px rgba(15, 23, 42, 0.16);
@@ -312,6 +322,8 @@ body {
 }
 
 .session-label {
+  flex: 1;
+  min-width: 0;
   font-size: 1.03rem;
   color: var(--session-text);
   white-space: nowrap;
@@ -319,26 +331,76 @@ body {
   text-overflow: ellipsis;
 }
 
-.session-delete {
+.session-actions {
+  position: relative;
+  flex-shrink: 0;
+}
+
+.session-menu-trigger {
   border: none;
   background: transparent;
   color: var(--session-delete);
-  width: 24px;
-  height: 24px;
+  width: 26px;
+  height: 26px;
   cursor: pointer;
   display: flex;
   align-items: center;
   justify-content: center;
-  opacity: 0.75;
-  flex-shrink: 0;
+  border-radius: 6px;
+  font-size: 1rem;
+  line-height: 1;
 }
 
-.session-delete svg {
-  width: 16px;
-  height: 16px;
+.session-menu-trigger:hover {
+  background: rgba(255, 255, 255, 0.08);
 }
 
-.board-sidebar.is-collapsed .session-delete {
+.board-layout.is-light .session-menu-trigger:hover {
+  background: rgba(56, 82, 124, 0.12);
+}
+
+.session-menu {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 6px);
+  min-width: 150px;
+  background: var(--session-menu-bg);
+  border: 1px solid var(--session-menu-border);
+  border-radius: 8px;
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.24);
+  z-index: 30;
+  padding: 6px;
+}
+
+.session-menu-item {
+  width: 100%;
+  border: none;
+  background: transparent;
+  color: var(--session-menu-text);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border-radius: 6px;
+  padding: 7px 8px;
+  font-size: 0.92rem;
+  cursor: pointer;
+}
+
+.session-menu-item:hover {
+  background: var(--session-menu-hover);
+}
+
+.session-menu-item.is-delete {
+  color: var(--session-menu-delete);
+}
+
+.session-menu-icon {
+  width: 18px;
+  text-align: center;
+  font-size: 0.9rem;
+}
+
+.board-sidebar.is-collapsed .session-actions {
   display: none;
 }
 
