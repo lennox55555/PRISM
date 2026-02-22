@@ -102,7 +102,13 @@ function getSlideItemLabel(item: SlideRenderItem): string {
 
 function getSessionShortLabel(name: string): string {
   const trimmed = name.trim();
-  return (trimmed.charAt(0) || 'S').toUpperCase();
+  const initials = trimmed
+    .split(/\s+/)
+    .filter((word) => word.length > 0)
+    .map((word) => word.charAt(0))
+    .join('')
+    .toUpperCase();
+  return initials || 'S';
 }
 
 function getLowestUnusedPositiveNumber(values: number[]): number {
@@ -1892,6 +1898,11 @@ function App() {
               <button type="button" className="board-footer-link">Settings</button>
               <button type="button" className="board-footer-link">Updates & FAQ</button>
             </>
+          )}
+          {isSidebarCollapsed && (
+            <div className="board-brand-row">
+              <PrismLogo />
+            </div>
           )}
         </div>
       </aside>

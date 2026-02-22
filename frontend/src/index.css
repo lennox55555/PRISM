@@ -350,10 +350,16 @@ body {
   padding: 0;
 }
 
+.board-sidebar.is-collapsed .session-label {
+  flex: none;
+  width: 100%;
+  text-align: center;
+}
+
 .board-sidebar-footer {
   margin-top: 16px;
   padding-top: 14px;
-  border-top: 1px solid #404a62;
+  border-top: none;
 }
 
 .board-brand-row {
@@ -361,6 +367,11 @@ body {
   align-items: center;
   gap: 14px;
   margin-bottom: 12px;
+}
+
+.board-sidebar.is-collapsed .board-brand-row {
+  justify-content: center;
+  margin-bottom: 0;
 }
 
 .board-logo {
