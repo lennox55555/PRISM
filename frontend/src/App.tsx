@@ -1867,6 +1867,23 @@ function App() {
                     >
                       Export PDF
                     </button>
+                    <button
+                      type="button"
+                      disabled={
+                        !hasSessionExportableData(session.id)
+                        || (session.id === activeSessionId && !isExportAvailable)
+                      }
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        void exportSessionAsPptx(session.id);
+                        const details = event.currentTarget.closest('details');
+                        if (details instanceof HTMLDetailsElement) {
+                          details.open = false;
+                        }
+                      }}
+                    >
+                      Export PPTX
+                    </button>
                   </div>
                 </details>
               )}
