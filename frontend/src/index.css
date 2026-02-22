@@ -178,7 +178,7 @@ body {
 .board-sidebar {
   width: 284px;
   background: #323232;
-  border-right: 2px solid #2897ff;
+  border-right: none;
   padding: 14px 10px 16px;
   display: flex;
   flex-direction: column;
@@ -270,9 +270,16 @@ body {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  flex: 1;
+  min-width: 0;
 }
 
-.session-delete {
+.session-actions-dropdown {
+  position: relative;
+  flex-shrink: 0;
+}
+
+.session-actions-trigger {
   border: none;
   background: transparent;
   color: #d7d7d7;
@@ -282,17 +289,60 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
-  opacity: 0.75;
-  flex-shrink: 0;
+  opacity: 0.82;
+  border-radius: 4px;
+  padding: 0;
 }
 
-.session-delete svg {
+.session-actions-trigger:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.session-actions-trigger::-webkit-details-marker {
+  display: none;
+}
+
+.session-actions-trigger svg {
   width: 16px;
   height: 16px;
 }
 
-.board-sidebar.is-collapsed .session-delete {
-  display: none;
+.session-actions-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  min-width: 130px;
+  border-radius: 8px;
+  border: 1px solid #404a62;
+  background: #1b2133;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.25);
+  overflow: hidden;
+  z-index: 120;
+}
+
+.session-actions-menu button {
+  width: 100%;
+  text-align: left;
+  padding: 9px 12px;
+  background: transparent;
+  color: #f3f3f3;
+  border: none;
+  cursor: pointer;
+  font-size: 13px;
+  transition: background 0.15s ease;
+}
+
+.session-actions-menu button:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.session-actions-menu button:not(:first-child) {
+  border-top: 1px solid #404a62;
+}
+
+.session-actions-menu button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }
 
 .board-sidebar.is-collapsed .board-session-item {
@@ -300,10 +350,16 @@ body {
   padding: 0;
 }
 
+.board-sidebar.is-collapsed .session-label {
+  flex: none;
+  width: 100%;
+  text-align: center;
+}
+
 .board-sidebar-footer {
   margin-top: 16px;
   padding-top: 14px;
-  border-top: 1px solid #404a62;
+  border-top: none;
 }
 
 .board-brand-row {
@@ -311,6 +367,11 @@ body {
   align-items: center;
   gap: 14px;
   margin-bottom: 12px;
+}
+
+.board-sidebar.is-collapsed .board-brand-row {
+  justify-content: center;
+  margin-bottom: 0;
 }
 
 .board-logo {
@@ -334,6 +395,46 @@ body {
   text-align: left;
   font-size: 1.02rem;
   cursor: pointer;
+}
+
+.board-theme-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.theme-toggle-icon {
+  width: 16px;
+  height: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.theme-toggle-icon svg {
+  width: 16px;
+  height: 16px;
+}
+
+.board-footer-link-with-icon {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.board-footer-icon {
+  width: 16px;
+  height: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.board-footer-icon svg {
+  width: 16px;
+  height: 16px;
 }
 
 /* Export dropdown styles */
@@ -362,6 +463,11 @@ body {
   box-shadow: 0 6px 20px rgba(0, 0, 0, 0.25);
   overflow: hidden;
   z-index: 100;
+}
+
+.sidebar-export-dropdown .export-dropdown-menu {
+  top: calc(100% + 8px);
+  bottom: auto;
 }
 
 .export-dropdown-menu button {
@@ -825,7 +931,7 @@ body {
   .board-sidebar.is-collapsed {
     width: 100%;
     border-right: none;
-    border-bottom: 2px solid #2897ff;
+    border-bottom: none;
   }
 
   .sidebar-toggle {
