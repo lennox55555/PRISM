@@ -458,8 +458,8 @@ function App() {
     lastCapturedTextLengthRef.current = 0;
   }, [activeSessionId, notesHistory, sessions, transcriptionText]);
 
-  const handleDeleteSession = useCallback((sessionId: number, event: React.MouseEvent) => {
-    event.stopPropagation();
+  const handleDeleteSession = useCallback((sessionId: number, event?: React.MouseEvent) => {
+    event?.stopPropagation();
 
     setSessions((prev) => {
       const filtered = prev.filter((session) => session.id !== sessionId);
@@ -790,32 +790,65 @@ function App() {
   }, []);
 
   // Export functionality
-  const getSessionContextForExport = useCallback(() => {
-    const allSessionSVGs = notesHistory
+  const getSessionForExport = useCallback((sessionId: number) => {
+    const targetSession = sessions.find((session) => session.id === sessionId);
+    if (!targetSession) {
+      return null;
+    }
+
+    if (sessionId !== activeSessionId) {
+      return {
+        session: targetSession,
+        notes: targetSession.notes,
+        transcriptionText: targetSession.transcriptionText,
+      };
+    }
+
+    return {
+      session: targetSession,
+      notes: notesHistory,
+      transcriptionText,
+    };
+  }, [activeSessionId, notesHistory, sessions, transcriptionText]);
+
+  const getSessionContextForExport = useCallback((sessionId = activeSessionId) => {
+    const targetData = getSessionForExport(sessionId);
+    if (!targetData) {
+      return null;
+    }
+
+    const { notes, transcriptionText: sessionTranscriptionText } = targetData;
+
+    const allSessionSVGs = notes
       .filter((item) => item.type === 'svg' && typeof item.svg === 'string')
       .map((item) => item.svg as string);
 
     const allUserSpeechTexts = [
-      ...notesHistory
+      ...notes
         .map((item) => item.newTextDelta || item.originalText)
         .filter((text) => typeof text === 'string' && text.trim().length > 0),
-      ...(transcriptionText.trim().length > 0 ? [transcriptionText] : []),
+      ...(sessionTranscriptionText.trim().length > 0 ? [sessionTranscriptionText] : []),
     ];
 
     return {
+      session: targetData.session,
+      notes,
       allSessionSVGs,
       allUserSpeechTexts,
     };
-  }, [notesHistory, transcriptionText]);
+  }, [activeSessionId, getSessionForExport]);
 
-  const exportSessionAsTxt = useCallback(() => {
-    const { allSessionSVGs, allUserSpeechTexts } = getSessionContextForExport();
-    const activeSession = sessions.find((session) => session.id === activeSessionId);
+  const exportSessionAsTxt = useCallback((sessionId = activeSessionId) => {
+    const sessionContext = getSessionContextForExport(sessionId);
+    if (!sessionContext) {
+      return;
+    }
+    const { allSessionSVGs, allUserSpeechTexts, session } = sessionContext;
 
     const exportBody = [
       'PRISM Session Export',
-      `Session ID: ${activeSessionId}`,
-      `Session Name: ${activeSession?.name ?? 'Unknown Session'}`,
+      `Session ID: ${session.id}`,
+      `Session Name: ${session.name}`,
       `Exported At: ${new Date().toISOString()}`,
       '',
       'allSessionSVGs:',
@@ -830,17 +863,51 @@ function App() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `session-${activeSessionId}-export.txt`;
+    a.download = `session-${session.id}-export.txt`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
-  }, [activeSessionId, getSessionContextForExport, sessions]);
+  }, [activeSessionId, getSessionContextForExport]);
 
-  const exportSessionAsPdf = useCallback(async () => {
-    const { allSessionSVGs, allUserSpeechTexts } = getSessionContextForExport();
-    const activeSession = sessions.find((session) => session.id === activeSessionId);
-    const chartItems = notesHistory.filter(
+  const exportSessionAsPdf = useCallback(async (sessionId = activeSessionId) => {
+    const sessionContext = getSessionContextForExport(sessionId);
+    if (!sessionContext) {
+      return;
+    }
+    const printWindow = window.open('', '_blank');
+    if (!printWindow) {
+      setError('Unable to open export window. Please allow pop-ups and try again.');
+      return;
+    }
+
+    printWindow.document.write(`
+      <!doctype html>
+      <html>
+        <head>
+          <meta charset="utf-8" />
+          <title>Preparing Export...</title>
+          <style>
+            body {
+              margin: 0;
+              min-height: 100vh;
+              display: grid;
+              place-items: center;
+              font-family: Inter, Arial, sans-serif;
+              color: #111827;
+              background: #ffffff;
+            }
+          </style>
+        </head>
+        <body>
+          <p>Preparing PDF export...</p>
+        </body>
+      </html>
+    `);
+    printWindow.document.close();
+
+    const { allSessionSVGs, allUserSpeechTexts, notes, session } = sessionContext;
+    const chartItems = notes.filter(
       (item) => item.type === 'chart' && typeof item.chartImage === 'string'
     );
     let llmSummary = 'Summary unavailable.';
@@ -921,7 +988,7 @@ function App() {
       <html>
         <head>
           <meta charset="utf-8" />
-          <title>Session ${activeSessionId} Export</title>
+          <title>Session ${session.id} Export</title>
           <style>
             * { box-sizing: border-box; }
             body {
@@ -984,8 +1051,8 @@ function App() {
         </head>
         <body>
           <h1>PRISM Session Export</h1>
-          <div class="subtle">Session ID: ${activeSessionId}</div>
-          <div class="subtle">Session Name: ${escapeHtml(activeSession?.name ?? 'Unknown Session')}</div>
+          <div class="subtle">Session ID: ${session.id}</div>
+          <div class="subtle">Session Name: ${escapeHtml(session.name)}</div>
           <div class="subtle">Exported At: ${escapeHtml(new Date().toISOString())}</div>
           <div class="summary">
             <div><strong>Speech Items:</strong> ${allUserSpeechTexts.length}</div>
@@ -1018,22 +1085,23 @@ function App() {
       </html>
     `;
 
-    const blob = new Blob([html], { type: 'text/html;charset=utf-8' });
-    const blobUrl = URL.createObjectURL(blob);
-    const printWindow = window.open(blobUrl, '_blank');
-    if (!printWindow) {
-      setError('Unable to open export window. Please allow pop-ups and try again.');
-      URL.revokeObjectURL(blobUrl);
+    if (printWindow.closed) {
+      setError('Export window was closed before the PDF was ready.');
       return;
     }
 
-    setTimeout(() => URL.revokeObjectURL(blobUrl), 60000);
-  }, [activeSessionId, getSessionContextForExport, notesHistory, sessions]);
+    printWindow.document.open();
+    printWindow.document.write(html);
+    printWindow.document.close();
+  }, [activeSessionId, getSessionContextForExport]);
 
-  const exportSessionAsPptx = useCallback(async () => {
-    const { allSessionSVGs, allUserSpeechTexts } = getSessionContextForExport();
-    const activeSession = sessions.find((session) => session.id === activeSessionId);
-    const visualizationItems = notesHistory.filter(
+  const exportSessionAsPptx = useCallback(async (sessionId = activeSessionId) => {
+    const sessionContext = getSessionContextForExport(sessionId);
+    if (!sessionContext) {
+      return;
+    }
+    const { allSessionSVGs, allUserSpeechTexts, notes, session } = sessionContext;
+    const visualizationItems = notes.filter(
       (item) => item.type === 'svg' || item.type === 'chart'
     );
     const cleanSpeechTexts = allUserSpeechTexts
@@ -1058,7 +1126,7 @@ function App() {
       pptx.author = 'PRISM';
       pptx.company = 'PRISM';
       pptx.subject = 'Voice Session Export';
-      pptx.title = `Session ${activeSessionId} Export`;
+      pptx.title = `Session ${session.id} Export`;
       const palette = {
         bg: 'F8FAFC',
         surface: 'FFFFFF',
@@ -1068,7 +1136,7 @@ function App() {
         accentSoft: 'F1F5F9',
         border: 'E2E8F0',
       };
-      const deckName = activeSession?.name ?? `Session ${activeSessionId}`;
+      const deckName = session.name ?? `Session ${session.id}`;
       const exportedAt = new Date().toLocaleString();
       let slideNumber = 0;
 
@@ -1490,18 +1558,21 @@ function App() {
         breakLine: true,
       });
 
-      const fileBase = sanitizeFilename(activeSession?.name ?? `session-${activeSessionId}`);
+      const fileBase = sanitizeFilename(session.name ?? `session-${session.id}`);
       await pptx.writeFile({ fileName: `${fileBase}-export.pptx` });
     } catch (exportError) {
       console.error('PPTX export failed:', exportError);
       setError('PowerPoint export failed. Please try again.');
     }
-  }, [activeSessionId, getSessionContextForExport, notesHistory, sessions]);
+  }, [activeSessionId, getSessionContextForExport]);
 
-  const hasExportableData =
-    notesHistory.length > 0 || transcriptionText.trim().length > 0;
-  const canShowExport =
-    recordingState === 'idle' && !isGeneratingSVG && hasExportableData;
+  const hasSessionExportableData = useCallback((sessionId: number) => {
+    return sessions.some((session) => session.id === sessionId);
+  }, [sessions]);
+
+  const isExportAvailable = recordingState === 'idle' && !isGeneratingSVG;
+  const hasExportableData = hasSessionExportableData(activeSessionId);
+  const canShowExport = isExportAvailable && hasExportableData;
 
   const prevRecordingStateRef = useRef<RecordingState>('idle');
 
@@ -1659,6 +1730,55 @@ function App() {
           {!isSidebarCollapsed && <span>New Board</span>}
         </button>
 
+        {false && !isSidebarCollapsed && (
+          <details className="export-dropdown sidebar-export-dropdown">
+            <summary className={`board-footer-link ${!canShowExport ? 'disabled' : ''}`}>
+              Export
+            </summary>
+            <div className="export-dropdown-menu">
+              <button
+                type="button"
+                disabled={!canShowExport}
+                onClick={(event) => {
+                  exportSessionAsTxt();
+                  const details = event.currentTarget.closest('details');
+                  if (details instanceof HTMLDetailsElement) {
+                    details.open = false;
+                  }
+                }}
+              >
+                .txt
+              </button>
+              <button
+                type="button"
+                disabled={!canShowExport}
+                onClick={(event) => {
+                  void exportSessionAsPdf();
+                  const details = event.currentTarget.closest('details');
+                  if (details instanceof HTMLDetailsElement) {
+                    details.open = false;
+                  }
+                }}
+              >
+                .pdf
+              </button>
+              <button
+                type="button"
+                disabled={!canShowExport}
+                onClick={(event) => {
+                  void exportSessionAsPptx();
+                  const details = event.currentTarget.closest('details');
+                  if (details instanceof HTMLDetailsElement) {
+                    details.open = false;
+                  }
+                }}
+              >
+                .pptx
+              </button>
+            </div>
+          </details>
+        )}
+
         <div className="board-session-list">
           {sessions.map((session) => (
             <div
@@ -1676,16 +1796,68 @@ function App() {
               >
                 {isSidebarCollapsed ? getSessionShortLabel(session.name) : session.name}
               </span>
-              <button
-                type="button"
-                className="session-delete"
-                onClick={(event) => handleDeleteSession(session.id, event)}
-                aria-label={`Delete ${session.name}`}
-              >
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                  <path d="M3 6h18M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2" />
-                </svg>
-              </button>
+              {!isSidebarCollapsed && (
+                <details
+                  className="session-actions-dropdown"
+                  onClick={(event) => event.stopPropagation()}
+                >
+                  <summary
+                    className="session-actions-trigger"
+                    aria-label={`Open actions for ${session.name}`}
+                    title={`Open actions for ${session.name}`}
+                  >
+                    <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                      <circle cx="5" cy="12" r="2" />
+                      <circle cx="12" cy="12" r="2" />
+                      <circle cx="19" cy="12" r="2" />
+                    </svg>
+                  </summary>
+                  <div className="session-actions-menu">
+                    <button
+                      type="button"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        handleRenameSession(session.id);
+                        const details = event.currentTarget.closest('details');
+                        if (details instanceof HTMLDetailsElement) {
+                          details.open = false;
+                        }
+                      }}
+                    >
+                      Rename
+                    </button>
+                    <button
+                      type="button"
+                      onClick={(event) => {
+                        const details = event.currentTarget.closest('details');
+                        if (details instanceof HTMLDetailsElement) {
+                          details.open = false;
+                        }
+                        handleDeleteSession(session.id, event);
+                      }}
+                    >
+                      Delete
+                    </button>
+                    <button
+                      type="button"
+                      disabled={
+                        !hasSessionExportableData(session.id)
+                        || (session.id === activeSessionId && !isExportAvailable)
+                      }
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        void exportSessionAsPdf(session.id);
+                        const details = event.currentTarget.closest('details');
+                        if (details instanceof HTMLDetailsElement) {
+                          details.open = false;
+                        }
+                      }}
+                    >
+                      Export PDF
+                    </button>
+                  </div>
+                </details>
+              )}
             </div>
           ))}
         </div>
@@ -1693,52 +1865,6 @@ function App() {
         <div className="board-sidebar-footer">
           {!isSidebarCollapsed && (
             <>
-              <details className="export-dropdown">
-                <summary className={`board-footer-link ${!canShowExport ? 'disabled' : ''}`}>
-                  Export
-                </summary>
-                <div className="export-dropdown-menu">
-                  <button
-                    type="button"
-                    disabled={!canShowExport}
-                    onClick={(event) => {
-                      exportSessionAsTxt();
-                      const details = event.currentTarget.closest('details');
-                      if (details instanceof HTMLDetailsElement) {
-                        details.open = false;
-                      }
-                    }}
-                  >
-                    .txt
-                  </button>
-                  <button
-                    type="button"
-                    disabled={!canShowExport}
-                    onClick={(event) => {
-                      void exportSessionAsPdf();
-                      const details = event.currentTarget.closest('details');
-                      if (details instanceof HTMLDetailsElement) {
-                        details.open = false;
-                      }
-                    }}
-                  >
-                    .pdf
-                  </button>
-                  <button
-                    type="button"
-                    disabled={!canShowExport}
-                    onClick={(event) => {
-                      void exportSessionAsPptx();
-                      const details = event.currentTarget.closest('details');
-                      if (details instanceof HTMLDetailsElement) {
-                        details.open = false;
-                      }
-                    }}
-                  >
-                    .pptx
-                  </button>
-                </div>
-              </details>
               <div className="save-status-indicator">
                 <span className={`save-status-dot ${hasUnsavedChanges ? 'unsaved' : 'saved'}`} />
                 <span className="save-status-text">
